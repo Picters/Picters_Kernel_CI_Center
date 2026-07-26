@@ -149,6 +149,9 @@ jobs:
           path: kernel_source
           submodules: recursive
           token: ${{ secrets.GH_TOKEN }}
+          # Enough history for the release changelog (git log since the commit
+          # the previous release recorded). Depth 1 would leave it empty.
+          fetch-depth: 200
 
       - name: Setup sccache
         uses: hendrikmuhs/ccache-action@v1.2.23

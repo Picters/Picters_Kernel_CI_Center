@@ -1141,16 +1141,35 @@ CONFDIR=/data/adb/picters_modules_manager
 
 # --- CPU/GPU performance caps (perf.conf) ---------------------------------
 # The vendor perf HAL (perfd) OWNS scaling_max_freq and rewrites it on load /
-# thermal events, so a one-shot cap doesn't hold. Re-apply on a loop to keep the
-# ceiling pinned. The app only ever writes real OPP-table frequencies (never
-# above stock). pmm_apply_perf returns non-zero once the app clears the flag, so
-# the loop exits cleanly. Runs in the background so it never blocks boot.
+# thermal events, so a one-shot cap doesn't hold. On a kernel with the in-kernel
+# FREQ_QOS ceilings the "kcpu" line below pins the CPU cap once and perfd can't
+# undo it; the loop stays for the GPU and for kernels without them. The app only
+# ever writes real OPP-table frequencies (never above stock). pmm_apply_perf
+# returns non-zero once the app clears the flag, so the loop exits cleanly. Runs
+# in the background so it never blocks boot.
 PERF_CONF=$CONFDIR/perf.conf
-pmm_apply_perf() {
+pmm_perf_enabled() {
   [ -f "$PERF_CONF" ] || return 1
   en=0
   while read -r k a _; do [ "$k" = "enabled" ] && en="$a"; done < "$PERF_CONF"
-  [ "$en" = "1" ] || return 1
+  [ "$en" = "1" ]
+}
+
+# In-kernel FREQ_QOS ceilings (CONFIG_PICTERS_PERF). perfd cannot raise these,
+# so they only need pinning once — and doing it here, before the perf HAL is up,
+# means the cap is already in force for the whole boot.
+KCAP=/sys/kernel/picters_perf/cpu_max_freq
+pmm_apply_kernel_caps() {
+  [ -w "$KCAP" ] || return 1
+  while read -r k rest; do
+    [ "$k" = "kcpu" ] && echo "$rest" > "$KCAP" 2>/dev/null
+  done < "$PERF_CONF"
+  return 0
+}
+pmm_perf_enabled && pmm_apply_kernel_caps
+
+pmm_apply_perf() {
+  pmm_perf_enabled || return 1
   while read -r k a b; do
     case "$k" in
       cpu) [ -n "$b" ] && [ -e "$a/scaling_max_freq" ] && echo "$b" > "$a/scaling_max_freq" 2>/dev/null ;;
@@ -1207,7 +1226,12 @@ fn module_version_code(date_str: &str) -> u64 {
     }
 }
 
-fn build_oot_module_zip(module_zip_name: &str, version_str: &str, date_str: &str) -> Result<bool> {
+fn build_oot_module_zip(
+    module_zip_name: &str,
+    version_str: &str,
+    date_str: &str,
+    changelog: &str,
+) -> Result<bool> {
     let cwd = env::current_dir()?;
     let ko_src = cwd.join("AnyKernel3/modules/system/lib/modules");
     if !ko_src.exists() {
@@ -1296,7 +1320,7 @@ fn build_oot_module_zip(module_zip_name: &str, version_str: &str, date_str: &str
     fs::write(
         stage.join("customize.sh"),
         format!(
-            "#!/sbin/sh\nSKIPUNZIP=0\nui_print \"- Picters Modules pack\"\nKO=$(ls \"$MODPATH/system/lib/modules/\"*.ko 2>/dev/null | wc -l)\nui_print \"- $KO drivers staged (non-Wi-Fi load on boot)\"\nset_perm_recursive \"$MODPATH\" 0 0 0755 0644\nfor s in action.sh service.sh; do [ -f \"$MODPATH/$s\" ] && chmod 0755 \"$MODPATH/$s\"; done\n{apk_ui_line}ui_print \"- Use the module Action button to open Picters Modules Manager\"\n"
+            "#!/sbin/sh\nSKIPUNZIP=0\nui_print \"- Picters Modules pack\"\nKO=$(ls \"$MODPATH/system/lib/modules/\"*.ko 2>/dev/null | wc -l)\nui_print \"- $KO drivers staged (non-Wi-Fi load on boot)\"\nset_perm_recursive \"$MODPATH\" 0 0 0755 0644\nfor s in action.sh service.sh; do [ -f \"$MODPATH/$s\" ] && chmod 0755 \"$MODPATH/$s\"; done\n# Settings (perf profile, boot-load flag, per-adapter tx power) live in\n# /data/adb/picters_modules_manager, outside this module dir — an update\n# replaces the module wholesale but never touches them.\nmkdir -p /data/adb/picters_modules_manager\nui_print \"- Your profile and settings are kept\"\n{apk_ui_line}ui_print \"- Use the module Action button to open Picters Modules Manager\"\n"
         ),
     )?;
     fs::write(
@@ -1317,6 +1341,10 @@ fn build_oot_module_zip(module_zip_name: &str, version_str: &str, date_str: &str
     fs::write(stage.join("action.sh"), include_str!("mod_action.sh"))?;
     fs::write(stage.join("service.sh"), build_boot_service())?;
 
+    // Ships inside the module so the app can show what's actually INSTALLED,
+    // not just what a pending release advertises.
+    fs::write(stage.join("CHANGELOG.md"), changelog)?;
+
     let out_zip = cwd.join(module_zip_name);
     if out_zip.exists() {
         let _ = fs::remove_file(&out_zip);
@@ -1328,6 +1356,125 @@ fn build_oot_module_zip(module_zip_name: &str, version_str: &str, date_str: &str
     )?;
     let _ = fs::remove_dir_all(&stage);
     Ok(out_zip.exists())
+}
+
+/// HTML comment stamped into every release body carrying the exact kernel-source
+/// commit the build came from. The next build reads it back to know where the
+/// previous changelog ended — tags can't be used for that, since `gh release
+/// create` tags the repo's default branch, not the tree we actually built.
+const CHANGELOG_SHA_MARK: &str = "<!-- picters-kernel-sha:";
+
+/// Pulls the kernel SHA out of the newest release body that carries the marker.
+/// None on the first build, on a network/gh failure, or when no release has one.
+fn previous_release_sha(repo: &str) -> Option<String> {
+    let api_path = format!("repos/{}/releases?per_page=20", repo);
+    let out = run_cmd(
+        &["gh", "api", api_path.as_str(), "--jq", ".[].body"],
+        None,
+        true,
+    )
+    .ok()??;
+
+    for line in out.lines() {
+        // `--jq .[].body` escapes newlines, so a body arrives as one line.
+        let Some(rest) = line.split(CHANGELOG_SHA_MARK).nth(1) else {
+            continue;
+        };
+        let sha: String = rest
+            .trim()
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect();
+        if sha.len() >= 7 {
+            return Some(sha);
+        }
+    }
+    None
+}
+
+/// The commit subjects to put in the release notes: everything on the kernel
+/// source since the previous release's recorded commit. Falls back to the most
+/// recent few when that commit isn't reachable — the CI checkout is shallow, so
+/// a long gap between builds (or a force-push) can put it out of range.
+fn changelog_commits(kernel_source_path: &Path, prev_sha: Option<&str>) -> Vec<String> {
+    let fmt = "--pretty=format:%s";
+    let ranged = prev_sha.and_then(|sha| {
+        let range = format!("{}..HEAD", sha);
+        run_cmd(
+            &["git", "log", "--no-merges", fmt, range.as_str()],
+            Some(kernel_source_path),
+            true,
+        )
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+    });
+
+    let raw = match ranged {
+        Some(r) => r,
+        None => run_cmd(
+            &["git", "log", "--no-merges", fmt, "-n", "15"],
+            Some(kernel_source_path),
+            true,
+        )
+        .ok()
+        .flatten()
+        .unwrap_or_default(),
+    };
+
+    let mut seen = HashSet::new();
+    raw.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter(|l| seen.insert(l.to_string()))
+        .take(40)
+        .map(|l| format!("- {}", l))
+        .collect()
+}
+
+/// The release body / shipped CHANGELOG.md. One document covers the whole build:
+/// the kernel and the Modules pack are cut from the same source tree, so the
+/// module's changes are the same commits.
+fn render_changelog(
+    kernel_source_path: &Path,
+    repo: &str,
+    branch: &str,
+    kernel_version: &str,
+    date_str: &str,
+) -> String {
+    let prev = previous_release_sha(repo);
+    let commits = changelog_commits(kernel_source_path, prev.as_deref());
+    let head = run_cmd(
+        &["git", "rev-parse", "HEAD"],
+        Some(kernel_source_path),
+        true,
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+    .trim()
+    .to_string();
+
+    let body = if commits.is_empty() {
+        "- No source changes since the previous build.".to_string()
+    } else {
+        commits.join("\n")
+    };
+    let scope = if prev.is_some() {
+        "since the previous build"
+    } else {
+        "most recent changes"
+    };
+
+    format!(
+        "## What's changed ({scope})\n\n{body}\n\n\
+         ## Build\n\n\
+         - Kernel {kernel_version} · branch `{branch}`\n\
+         - Built {date_str}\n\n\
+         The Modules pack in this release is built from the same tree, so these \
+         are its changes too.\n\n\
+         {CHANGELOG_SHA_MARK} {head} -->\n"
+    )
 }
 
 /// Print the module_layout CRC so a KMI regression is caught in the build log
@@ -1564,13 +1711,37 @@ fn patch_realtek_cfi(subdir: &Path) {
 /// real memory layout; whatever length-tracking the driver's own code
 /// already does (loop bound, `len` param, `ret_len` field) remains the
 /// actual (runtime) bounds check it always relied on.
+///
+/// A THIRD, unrelated array-bounds trap sits on the tx-power path.
+/// `phy_GetChnlIndex()` maps a channel number to a per-channel power-table
+/// index with a bare `*ChannelIdx = Channel - 1`, so channel 0 underflows the
+/// u8 to 255 and `PHY_GetTxPowerIndexBase()` then indexes
+/// `Index24G_CCK_Base[path][255]` out of a `[..][14]` array — a compile-time
+/// provable violation UBSAN turns into a hard panic. The function's own
+/// `HAL_IsLegalChannel()` guard sets `chnlIdx = 0` but is dead code: the
+/// `phy_GetChnlIndex()` call right below it overwrites the result. A 5G channel
+/// missing from `center_ch_5g_all[]` is the same bug from the other side —
+/// the loop simply never assigns and the caller's `Channel - 1` stands.
+/// Channel 0 is exactly what `cfg80211_rtw_set_txpower()` passes
+/// (`pHalData->current_channel`) while the interface is up but untuned, i.e.
+/// on `iw dev wlanN set txpower fixed ...` right after an adapter is plugged
+/// in — which is when our own app re-applies the user's saved tx power.
+/// Diagnosed on-device via last_kmsg: `PHY_GetTxPowerIndexBase+0x5f4/0x5fc
+/// [88XXau]` <- `cfg80211_rtw_set_txpower` <- `nl80211_set_wiphy`, Comm: iw.
+/// Fix: default the index to 0 and only derive it from a real channel, so an
+/// unknown/zero channel lands on the first table entry — which is what the
+/// driver's own illegal-channel branch always meant to do. morrownr's newer
+/// 88x2bu codebase renamed the helper (`phy_get_ch_idx`) and added a partial
+/// `ch > 0` guard that still leaves the 5G miss unassigned, so it gets its own
+/// rule. Belt-and-braces: skip the re-apply entirely while `current_channel`
+/// is 0, since nothing can be programmed for a channel the radio isn't on.
 fn patch_realtek_ubsan(subdir: &Path) {
     // The key[0]->key[] rule is the catch-all: aircrack declares ieee_param's
     // crypt.key as u8 key[0], so EVERY key[16]/key[24] MIC read (group AND the
     // pairwise dot11tkip*mickey copies) is UBSAN-instrumented and panics on a
     // TKIP handshake. morrownr uses key[] (flex array, UBSAN-exempt) and never
     // panics — match that. The two TKIP guards below stay as belt-and-braces.
-    let rules: [(&str, &str, &str); 7] = [
+    let rules: [(&str, &str, &str); 11] = [
         ("UCHAR  data[1];", "UCHAR  data[];", "var-ie-flexarray"),
         (
             "u8\t\tData[1]; /* byte1 is extension event code */",
@@ -1594,12 +1765,37 @@ fn patch_realtek_ubsan(subdir: &Path) {
             "if (strcmp(param->u.crypt.alg, \"TKIP\") == 0) _rtw_memcpy(padapter->securitypriv.dot118021XGrprxmickey[param->u.crypt.idx].skey, param->u.crypt.key + 24, 8);",
             "grpkey-rxmic-tkip-guard",
         ),
+        // Channel -> power-table index. Default to 0 so channel 0 (untuned
+        // radio) and an unknown 5G channel both land in bounds.
+        (
+            "\tu8  i = 0;\n\tBOOLEAN bIn24G = _TRUE;\n\n\tif (Channel <= 14) {\n\t\tbIn24G = _TRUE;\n\t\t*ChannelIdx = Channel - 1;\n\t} else {",
+            "\tu8  i = 0;\n\tBOOLEAN bIn24G = _TRUE;\n\n\t*ChannelIdx = 0;\n\tif (Channel <= 14) {\n\t\tbIn24G = _TRUE;\n\t\tif (Channel >= 1)\n\t\t\t*ChannelIdx = Channel - 1;\n\t} else {",
+            "chnl-idx-zero-guard",
+        ),
+        // Same helper, renamed + partially guarded, in morrownr's 88x2bu.
+        (
+            "\tu8  i = 0;\n\tBOOLEAN bIn24G = _TRUE;\n\n\tif (ch > 0 && ch <= 14) {\n\t\tbIn24G = _TRUE;\n\t\t*ch_idx = ch - 1;\n\t} else {",
+            "\tu8  i = 0;\n\tBOOLEAN bIn24G = _TRUE;\n\n\t*ch_idx = 0;\n\tif (ch <= 14) {\n\t\tbIn24G = _TRUE;\n\t\tif (ch > 0)\n\t\t\t*ch_idx = ch - 1;\n\t} else {",
+            "ch-idx-zero-guard-x2bu",
+        ),
+        // Don't re-apply tx power for a channel the radio isn't on yet.
+        // Two rules: the aircrack forks' body is one tab in, 8814au's is two.
+        (
+            "\tpHalData->CurrentTxPwrIdx = value;\n\trtw_hal_set_tx_power_level(padapter, pHalData->current_channel);",
+            "\tpHalData->CurrentTxPwrIdx = value;\n\tif (pHalData->current_channel)\n\t\trtw_hal_set_tx_power_level(padapter, pHalData->current_channel);",
+            "set-txpower-idle-guard",
+        ),
+        (
+            "\t\tpHalData->CurrentTxPwrIdx = value;\n\t\trtw_hal_set_tx_power_level(padapter, pHalData->current_channel);",
+            "\t\tpHalData->CurrentTxPwrIdx = value;\n\t\tif (pHalData->current_channel)\n\t\t\trtw_hal_set_tx_power_level(padapter, pHalData->current_channel);",
+            "set-txpower-idle-guard-8814",
+        ),
     ];
 
     let mut files = Vec::new();
     collect_c_sources(subdir, &mut files);
 
-    let mut hits = [0usize; 7];
+    let mut hits = [0usize; 11];
     for file in files {
         let Ok(content) = fs::read_to_string(&file) else {
             continue;
@@ -2388,6 +2584,16 @@ pub fn handle_build(
         false,
     )?;
 
+    // One changelog for the whole build — it becomes the release body AND rides
+    // inside the module zip, so the app can show it for the installed build too.
+    let changelog = render_changelog(
+        &kernel_source_path,
+        &proj.repo,
+        &branch,
+        &kernel_version,
+        &date_str,
+    );
+
     // Standalone, manager-agnostic OOT-modules zip (extra-modules projects only).
     let module_zip_name: Option<String> = if proj.extra_fragment.is_some() {
         let name = format!(
@@ -2395,7 +2601,7 @@ pub fn handle_build(
             zip_prefix, clean_localversion, feature_suffix, date_str
         );
         let version_str = format!("{}-{}", kernel_version, clean_localversion);
-        match build_oot_module_zip(&name, &version_str, &date_str) {
+        match build_oot_module_zip(&name, &version_str, &date_str, &changelog) {
             Ok(true) => {
                 println!("Modules: built standalone OOT module zip {}", name);
                 Some(name)
@@ -2424,10 +2630,7 @@ pub fn handle_build(
         );
 
         if Path::new(&final_zip_name).exists() {
-            let notes = format!(
-                "Automated build for {}\nKernel Version: {}",
-                branch, kernel_version
-            );
+            let notes = changelog.as_str();
             let mut rel_args: Vec<&str> = vec![
                 "gh",
                 "release",
@@ -2446,7 +2649,7 @@ pub fn handle_build(
             rel_args.push("--title");
             rel_args.push(release_title.as_str());
             rel_args.push("--notes");
-            rel_args.push(notes.as_str());
+            rel_args.push(notes);
             run_cmd(&rel_args, None, false)?;
 
             handle_notify(release_tag)?;

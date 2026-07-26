@@ -1856,6 +1856,46 @@ fn patch_realtek_connect_null_bss(subdir: &Path) {
 }
 
 
+/// The aircrack forks report a DISCONNECT to cfg80211 as a SUCCESSFUL CONNECT
+/// when the disconnect carries no reason code. `rtw_cfg80211_indicate_disconnect()`
+/// passes its `reason` straight through as the connect *status*, and
+/// `reason == 0` is `WLAN_STATUS_SUCCESS` — so `__cfg80211_connect_result()`
+/// takes the success path with `links[0].bssid == NULL` (the call site passes
+/// NULL for the BSSID, correct for a failure) and NULL-derefs in the
+/// `ether_addr_copy(wdev->u.client.connected_addr, connected_addr)` right after
+/// `wdev->connected = true`. Reason 0 is exactly what a locally generated
+/// teardown produces — bringing the interface down or flipping its type while a
+/// connect is still in flight, i.e. what monitor-mode tooling does routinely.
+/// Diagnosed on-device via last_kmsg: `__cfg80211_connect_result+0x6b8/0x9a4`,
+/// Comm: kworker (cfg80211_event_work), faulting on `ldr w8, [x23]` with x23 = 0.
+/// morrownr's newer forks (8814au, 88x2bu) already write exactly the fix below,
+/// so this only brings the two aircrack forks in line with them. Two call sites
+/// per fork (the pre-3.11 sme_state branch and the modern connect_req one) share
+/// one literal.
+fn patch_realtek_disconnect_status(subdir: &Path) {
+    let needle = "\t\t\trtw_cfg80211_connect_result(pwdev, NULL, NULL, 0, NULL, 0,\n\t\t\t\treason, GFP_ATOMIC);";
+    let repl = "\t\t\trtw_cfg80211_connect_result(pwdev, NULL, NULL, 0, NULL, 0,\n\t\t\t\treason ? reason : WLAN_STATUS_UNSPECIFIED_FAILURE, GFP_ATOMIC);";
+
+    let mut files = Vec::new();
+    collect_c_sources(subdir, &mut files);
+    let mut hits = 0usize;
+    for file in files {
+        let Ok(content) = fs::read_to_string(&file) else {
+            continue;
+        };
+        let n = content.matches(needle).count();
+        if n > 0 {
+            hits += n;
+            let _ = fs::write(&file, content.replace(needle, repl));
+        }
+    }
+    if hits > 0 {
+        println!("OOT disconnect-status guard: x{}", hits);
+    } else {
+        println!("OOT disconnect-status guard: no pattern (already patched / morrownr fork)");
+    }
+}
+
 /// Clone + build the out-of-tree aircrack Wi-Fi injection drivers
 /// (rtl8812au/8814au/8188eus for RTL8812AU/8814AU chips absent from in-tree
 /// 6.12) against the just-built kernel and drop their .ko into the AnyKernel3
@@ -1937,6 +1977,10 @@ fn build_extra_oot_modules(
         // Guard the connect-result path: rtl8812au hands cfg80211 a NULL bss on
         // a weak/aged AP, NULL-derefing __cfg80211_connect_result on 6.12.
         patch_realtek_connect_null_bss(&subdir_abs);
+
+        // Stop a reason-less disconnect being reported to cfg80211 as a
+        // successful connect with no BSSID — an instant NULL-deref panic.
+        patch_realtek_disconnect_status(&subdir_abs);
 
         let m_arg = format!("M={}", subdir_abs.display());
         let mut args: Vec<&str> = make_args.to_vec();

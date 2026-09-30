@@ -1346,7 +1346,7 @@ fn build_oot_module_zip(
     fs::write(
         stage.join("module.prop"),
         format!(
-            "id=picters-modules-pack\nname=Picters {channel} OOT Modules\nversion={version_str}-{date_str}\nversionCode={version_code}\nauthor=Picters\ndescription=Matching {channel} kernel drivers with Picters Modules Manager 1.3.2. Install manually after booting the paired kernel.\n"
+            "id=picters-modules-pack\nname=Picters {channel} OOT Modules\nreleaseChannel={channel}\nversion={version_str}-{date_str}\nversionCode={version_code}\nauthor=Picters\ndescription=Matching {channel} kernel drivers with Picters Modules Manager 1.3.2. Install manually after booting the paired kernel.\n"
         ),
     )?;
     let install_guard = compatibility_install_guard(&compatibility)?;
@@ -2759,8 +2759,20 @@ pub fn handle_build(
     } else {
         "A17"
     };
-    let final_zip_name = format!("{channel}-Kernel.zip");
     let clean_localversion = localversion.trim_start_matches('-');
+    let android_label = if channel == "A16" {
+        "android16"
+    } else {
+        "android17"
+    };
+    let asset_localversion = clean_localversion.replacen("android16", android_label, 1);
+    let feature_suffix = if feature_suffixes.is_empty() {
+        String::new()
+    } else {
+        format!("-{}", feature_suffixes.join("-"))
+    };
+    let final_zip_name =
+        format!("Mi17_Kernel-{kernel_version}-{asset_localversion}{feature_suffix}-{date_str}.zip");
 
     run_cmd(
         &[
@@ -2794,14 +2806,16 @@ pub fn handle_build(
     let changelog = render_changelog(
         &kernel_source_path,
         &proj.repo,
-        &branch,
+        compatibility["channel"].as_str().unwrap_or("unknown"),
         &kernel_version,
         &date_str,
     );
 
     // Standalone, manager-agnostic OOT-modules zip (extra-modules projects only).
     let module_zip_name: Option<String> = if proj.extra_fragment.is_some() {
-        let name = format!("{channel}-OOTMODULES.zip");
+        let name = format!(
+            "Mi17_OOTMODULES-{kernel_version}-{asset_localversion}{feature_suffix}-{date_str}.zip"
+        );
         let version_str = format!("{}-{}", kernel_version, clean_localversion);
         match build_oot_module_zip(&name, &version_str, &date_str, &changelog) {
             Ok(true) => {
@@ -2828,8 +2842,11 @@ pub fn handle_build(
     } else {
         "Android 16 / KMI5 base. Confirm firmware compatibility before installing."
     };
+    let modules_name = module_zip_name
+        .as_deref()
+        .ok_or_else(|| anyhow!("Required OOT pack missing"))?;
     let release_notes = format!(
-        "# Picters Xiaomi 17 — {channel}\n\n{notice}\n\n| Package | Contents |\n| --- | --- |\n| `{channel}-Kernel.zip` | Kernel {kernel_version}, ReSukiSU, Picters frequency driver and extra drivers |\n| `{channel}-OOTMODULES.zip` | Modules compiled for this exact kernel, signed Picters Modules Manager 1.3.2 |\n\n## Manual installation\n\n1. Download both files from this same {channel} release.\n2. Install the kernel with your preferred AnyKernel3-compatible installer and boot it.\n3. Install the matching OOTMODULES pack through KernelSU/Magisk, then reboot. The manager is provided as a system app.\n\nThe manager opens GitHub releases and never downloads, installs or flashes updates. Old manager 1.3.1 cannot discover this package format. Do not mix A16 and A17 packs. The OOT installer checks the running kernel; its boot service skips loading drivers on a different kernel.\n\n## Build verification\n\nKMI generation: {}. Matches known working core ABI baseline: {}. Full report: `kmi-report.json`. This does not replace a successful boot test.\n\n{}",
+        "# Picters Xiaomi 17 — {channel}\n\n{notice}\n\n| Package | Contents |\n| --- | --- |\n| `{final_zip_name}` | Kernel {kernel_version}, ReSukiSU, Picters frequency driver and extra drivers |\n| `{modules_name}` | Modules compiled for this exact kernel, signed Picters Modules Manager 1.3.2 |\n\n## Manual installation\n\n1. Download both files from this same {channel} release.\n2. Install the kernel with your preferred AnyKernel3-compatible installer and boot it.\n3. Install the matching OOTMODULES pack through KernelSU/Magisk, then reboot. The manager is provided as a system app.\n\nThe manager opens GitHub releases and never downloads, installs or flashes updates. Old manager 1.3.1 cannot discover this package format. Do not mix A16 and A17 packs. The OOT installer checks the running kernel; its boot service skips loading drivers on a different kernel.\n\n## Build verification\n\nKMI generation: {}. Matches known working core ABI baseline: {}. Full report: `kmi-report.json`. This does not replace a successful boot test.\n\n{}",
         compatibility["kmi_generation"], abi_report["matches_baseline"], changelog
     );
     fs::write("RELEASE-NOTES.md", release_notes)?;
@@ -2852,6 +2869,10 @@ pub fn handle_build(
     update_manifest["date_label"] = serde_json::json!(date_str);
     update_manifest["kernel_asset"] = serde_json::json!(final_zip_name);
     update_manifest["modules_asset"] = serde_json::json!(module_zip_name);
+    update_manifest["source_commit"] = serde_json::json!(short_sha);
+    update_manifest["expected_kernel_release"] = serde_json::json!(
+        fs::read_to_string(kernel_source_path.join("out/include/config/kernel.release"))?.trim()
+    );
     update_manifest["manager_version"] = serde_json::json!("1.3.2");
     update_manifest["manager_sha256"] =
         serde_json::json!(file_sha256(Path::new("assets/PictersModulesManager.apk"))?);

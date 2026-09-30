@@ -1,12 +1,30 @@
-## Picters compatibility channels
+## Пакеты Picters для Xiaomi 17
 
-Manual builds default to `android16` (6.12.23, KMI5). `android17` contains the experimental 6.12.69/KMI6 tree; Android 17 support has not been established. Variant selection is independent of source branch: both use ReSukiSU.
+| Канал | База | Ядро | Модули и приложение |
+| --- | --- | --- | --- |
+| **A16** | Linux 6.12.23 · KMI 5 · ReSukiSU | `A16-Kernel.zip` | `A16-OOTMODULES.zip` |
+| **A17 — экспериментальный** | Linux 6.12.69 · KMI 6 · ReSukiSU | `A17-Kernel.zip` | `A17-OOTMODULES.zip` |
 
-All dispatch builds are artifacts only. Source `picters-compatibility.json` must match `build.config.constants`. Releases require `status: validated`, an Android SDK, tested exact vendor fingerprints, and the full ABI baseline check. Both channels currently have no validated vendor fingerprints, so releases are blocked.
+Поддержка Android 17 новой базой пока не подтверждена. На Android 16 / OS3.0.315.0.WPCCNXM она не загрузилась. Версия Android сама по себе не гарантирует совместимость с vendor-модулями.
 
-A successful boot test is required before recording an actual `ro.vendor.build.fingerprint`. Do not infer it from the HyperOS version or SDK. New releases include `picters-update.json` binding the two assets to SDK, KMI generation, channel and tested vendor identities. Manager 1.3.3 rejects releases without this metadata and rechecks before installing.
+Каждый OOT-пакет содержит драйверы **только для своего ядра** и подписанный Picters Modules Manager **1.3.2**. Приложение показывает новые релизы и открывает GitHub; скачивание и установка выполняются вручную. Старый менеджер 1.3.1 не распознаёт новые имена пакетов.
 
-Old managers also scan prereleases, so KMI6 module names deliberately omit `OOT-Modules`; old managers ignore them. KMI5 ZIP installers check Android SDK and, once validated, vendor fingerprint before modifying boot or installing modules. Experimental artifacts are for manual testing only and do not establish firmware compatibility.
+### Установка
+
+1. Скачайте ядро и OOT-пакет из одного релиза своего канала.
+2. Установите ядро и загрузите телефон.
+3. Установите соответствующий OOT-пакет в KernelSU/Magisk и перезагрузите телефон.
+
+Установщик модулей проверяет точную строку ядра. При смене ядра boot-service пропускает загрузку чужих драйверов. Настройки приложения сохраняются.
+
+### Сборка
+
+`Build A16 and A17 packages` собирает оба канала и сохраняет артефакты без публикации. Для одного канала используйте `Build Kernel`. Все автоматические dispatch-сборки также создают только артефакты.
+
+APK хранится в `assets/` вместе с SHA-256; ключ подписи в репозиторий не попадает. Сборка проверяет SHA-256 и не скачивает APK из отдельного релиза приложения.
+
+Каждая сборка включает `SHA256SUMS`, `build-info.json`, `kmi-report.json` и `RELEASE-NOTES.md`. Заголовки будущих релизов разделены по A16/A17, теги: `A16-YYYYMMDD-HHMM` / `A17-YYYYMMDD-HHMM`. Публикация требует отдельного запуска с разрешённым релизом и подтверждённой совместимостью vendor/ABI.
+
 
 # Picters Kernel CI Center
 

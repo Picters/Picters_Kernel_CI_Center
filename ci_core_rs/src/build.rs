@@ -1313,36 +1313,13 @@ fn build_oot_module_zip(
         }
     }
 
-    // Stage the Picters Modules Manager APK as a genuine system app via the same
-    // systemless overlay, if one has been built. It's a separate Flutter project
-    // (github.com/Picters/picters_modules_manager, not part of this crate/repo) that
-    // releases its own APK as a GitHub release asset — deliberately NOT built from
-    // source here, so a Flutter/Gradle toolchain issue can never break a kernel build,
-    // and the app's release cadence stays independent of the kernel's. If no APK has
-    // already been placed at <cwd>/PictersModulesManager.apk (e.g. by hand, for a local
-    // test build), best-effort fetch the latest release; either way this never fails
-    // the kernel build, it just skips embedding the app if nothing is available.
-    // PackageManager only scans /system/app at boot, so this needs a reboot after
-    // (re)installing the module before the app is registered/updated — a live
-    // `pm install` would only add it as a normal user app, not register it as system.
-    let apk_src = cwd.join("PictersModulesManager.apk");
-    if !apk_src.exists() {
-        let _ = run_cmd(
-            &[
-                "gh",
-                "release",
-                "download",
-                "--repo",
-                "Picters/picters_modules_manager",
-                "--pattern",
-                "*.apk",
-                "--output",
-                apk_src.to_str().unwrap_or("PictersModulesManager.apk"),
-                "--clobber",
-            ],
-            None,
-            false,
-        );
+    // The signed manager is versioned with this CI checkout and distributed
+    // only inside each kernel's matching OOT pack. Never fetch an APK release.
+    let apk_src = cwd.join("assets/PictersModulesManager.apk");
+    let expected_apk_hash =
+        fs::read_to_string(cwd.join("assets/PictersModulesManager.apk.sha256"))?;
+    if file_sha256(&apk_src)? != expected_apk_hash.split_whitespace().next().unwrap_or("") {
+        return Err(anyhow!("Bundled manager APK checksum mismatch"));
     }
     let apk_embedded = if apk_src.exists() {
         let app_dir = stage.join("system/app/PictersModulesManager");
@@ -1359,15 +1336,23 @@ fn build_oot_module_zip(
 
     // versionCode is a monotonic build stamp (see module_version_code); the app
     // compares it against the latest release to gate features on a matching kernel.
+    let compatibility = load_compatibility(Path::new("kernel_source"))?;
+    let channel = if compatibility["channel"] == "android16" {
+        "A16"
+    } else {
+        "A17"
+    };
     let version_code = module_version_code(date_str);
     fs::write(
         stage.join("module.prop"),
         format!(
-            "id=picters-modules-pack\nname=Picters Modules Pack\nversion={version_str}-{date_str}\nversionCode={version_code}\nauthor=Picters\ndescription=Extra kernel drivers — managed from the Picters Modules Manager app.\n"
+            "id=picters-modules-pack\nname=Picters {channel} OOT Modules\nversion={version_str}-{date_str}\nversionCode={version_code}\nauthor=Picters\ndescription=Matching {channel} kernel drivers with Picters Modules Manager 1.3.2. Install manually after booting the paired kernel.\n"
         ),
     )?;
-    let compatibility = load_compatibility(Path::new("kernel_source"))?;
     let install_guard = compatibility_install_guard(&compatibility)?;
+    let expected_kernel = fs::read_to_string("kernel_source/out/include/config/kernel.release")?;
+    fs::write(stage.join("expected-kernel"), expected_kernel.trim())?;
+    let pair_guard = "EXPECTED_KERNEL=\"$(unzip -p \"$ZIPFILE\" expected-kernel)\"\n[ -n \"$EXPECTED_KERNEL\" ] && [ \"$(uname -r)\" = \"$EXPECTED_KERNEL\" ] || abort 'Install and boot the matching kernel before this OOT pack'\n";
     let apk_ui_line = if apk_embedded {
         "ui_print \"- Picters Modules Manager staged as a system app — reboot to activate\"\n"
     } else {
@@ -1376,7 +1361,7 @@ fn build_oot_module_zip(
     fs::write(
         stage.join("customize.sh"),
         format!(
-            "#!/sbin/sh\n{install_guard}SKIPUNZIP=0\nui_print \"- Picters Modules pack\"\nKO=$(ls \"$MODPATH/system/lib/modules/\"*.ko 2>/dev/null | wc -l)\nui_print \"- $KO drivers staged (non-Wi-Fi load on boot)\"\nset_perm_recursive \"$MODPATH\" 0 0 0755 0644\nfor s in action.sh service.sh; do [ -f \"$MODPATH/$s\" ] && chmod 0755 \"$MODPATH/$s\"; done\n# Settings (perf profile, boot-load flag, per-adapter tx power) live in\n# /data/adb/picters_modules_manager, outside this module dir — an update\n# replaces the module wholesale but never touches them.\nmkdir -p /data/adb/picters_modules_manager\nui_print \"- Your profile and settings are kept\"\n{apk_ui_line}ui_print \"- Use the module Action button to open Picters Modules Manager\"\n"
+            "#!/sbin/sh\n{install_guard}{pair_guard}SKIPUNZIP=0\nui_print \"- Picters Modules pack\"\nKO=$(ls \"$MODPATH/system/lib/modules/\"*.ko 2>/dev/null | wc -l)\nui_print \"- $KO drivers staged (non-Wi-Fi load on boot)\"\nset_perm_recursive \"$MODPATH\" 0 0 0755 0644\nfor s in action.sh service.sh; do [ -f \"$MODPATH/$s\" ] && chmod 0755 \"$MODPATH/$s\"; done\n# Settings (perf profile, boot-load flag, per-adapter tx power) live in\n# /data/adb/picters_modules_manager, outside this module dir — an update\n# replaces the module wholesale but never touches them.\nmkdir -p /data/adb/picters_modules_manager\nui_print \"- Your profile and settings are kept\"\n{apk_ui_line}ui_print \"- Use the module Action button to open Picters Modules Manager\"\n"
         ),
     )?;
     fs::write(
@@ -1395,7 +1380,16 @@ fn build_oot_module_zip(
     // built, opened via this module's Action button) is the control surface for
     // toggling any driver on demand via root.
     fs::write(stage.join("action.sh"), include_str!("mod_action.sh"))?;
-    fs::write(stage.join("service.sh"), build_boot_service())?;
+    let service = build_boot_service();
+    let split = service
+        .find('\n')
+        .ok_or_else(|| anyhow!("Service shebang missing"))?
+        + 1;
+    let boot_guard = "MODDIR=\"${0%/*}\"\n[ \"$(uname -r)\" = \"$(cat \"$MODDIR/expected-kernel\")\" ] || exit 0\n";
+    fs::write(
+        stage.join("service.sh"),
+        format!("{}{}{}", &service[..split], boot_guard, &service[split..]),
+    )?;
 
     // Ships inside the module so the app can show what's actually INSTALLED,
     // not just what a pending release advertises.
@@ -2758,25 +2752,15 @@ pub fn handle_build(
         .with_timezone(&hkt)
         .format("%Y%m%d-%H%M")
         .to_string();
-    // Older managers scan every release (including prereleases) for OOT-Modules.
-    // KMI6 assets must not match their parser; only manifest-aware clients see them.
-    let experimental = compatibility["channel"] == "android17";
-    let zip_prefix = if experimental {
-        "Mi17-KMI6"
+    // Fixed names deliberately do not match the legacy manager's OOT-Modules
+    // marker or timestamped ZIP parser, for either compatibility channel.
+    let channel = if compatibility["channel"] == "android16" {
+        "A16"
     } else {
-        proj.zip_name_prefix.as_deref().unwrap_or("Kernel")
+        "A17"
     };
-    let feature_suffix = if feature_suffixes.is_empty() {
-        String::new()
-    } else {
-        format!("-{}", feature_suffixes.join("-"))
-    };
-
+    let final_zip_name = format!("{channel}-Kernel.zip");
     let clean_localversion = localversion.trim_start_matches('-');
-    let final_zip_name = format!(
-        "{}-{}-{}{}-{}.zip",
-        zip_prefix, kernel_version, clean_localversion, feature_suffix, date_str
-    );
 
     run_cmd(
         &[
@@ -2817,15 +2801,7 @@ pub fn handle_build(
 
     // Standalone, manager-agnostic OOT-modules zip (extra-modules projects only).
     let module_zip_name: Option<String> = if proj.extra_fragment.is_some() {
-        let modules_label = if experimental {
-            "Modules"
-        } else {
-            "OOT-Modules"
-        };
-        let name = format!(
-            "{}-{}-{}{}-{}.zip",
-            zip_prefix, modules_label, clean_localversion, feature_suffix, date_str
-        );
+        let name = format!("{channel}-OOTMODULES.zip");
         let version_str = format!("{}-{}", kernel_version, clean_localversion);
         match build_oot_module_zip(&name, &version_str, &date_str, &changelog) {
             Ok(true) => {
@@ -2837,36 +2813,61 @@ pub fn handle_build(
                 None
             }
             Err(e) => {
-                println!("Modules: WARN could not build OOT module zip: {}", e);
-                None
+                return Err(anyhow!("Required OOT pack could not be built: {}", e));
             }
         }
     } else {
         None
     };
 
+    let abi_report: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+        kernel_source_path.join("out/kmi-report.json"),
+    )?)?;
+    let notice = if channel == "A17" {
+        "**Experimental KMI6 build. Android 17/vendor compatibility is unverified. This base failed to boot OS3.0.315.0.WPCCNXM (Android 16).**"
+    } else {
+        "Android 16 / KMI5 base. Confirm firmware compatibility before installing."
+    };
+    let release_notes = format!(
+        "# Picters Xiaomi 17 — {channel}\n\n{notice}\n\n| Package | Contents |\n| --- | --- |\n| `{channel}-Kernel.zip` | Kernel {kernel_version}, ReSukiSU, Picters frequency driver and extra drivers |\n| `{channel}-OOTMODULES.zip` | Modules compiled for this exact kernel, signed Picters Modules Manager 1.3.2 |\n\n## Manual installation\n\n1. Download both files from this same {channel} release.\n2. Install the kernel with your preferred AnyKernel3-compatible installer and boot it.\n3. Install the matching OOTMODULES pack through KernelSU/Magisk, then reboot. The manager is provided as a system app.\n\nThe manager opens GitHub releases and never downloads, installs or flashes updates. Old manager 1.3.1 cannot discover this package format. Do not mix A16 and A17 packs. The OOT installer checks the running kernel; its boot service skips loading drivers on a different kernel.\n\n## Build verification\n\nKMI generation: {}. Matches known working core ABI baseline: {}. Full report: `kmi-report.json`. This does not replace a successful boot test.\n\n{}",
+        compatibility["kmi_generation"], abi_report["matches_baseline"], changelog
+    );
+    fs::write("RELEASE-NOTES.md", release_notes)?;
+    fs::write(
+        "SHA256SUMS",
+        format!(
+            "{}  {}\n{}  {}\n",
+            file_sha256(Path::new(&final_zip_name))?,
+            final_zip_name,
+            file_sha256(Path::new(
+                module_zip_name
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("Required OOT pack missing"))?
+            ))?,
+            module_zip_name.as_deref().unwrap()
+        ),
+    )?;
     let mut update_manifest = compatibility.clone();
     update_manifest["version_code"] = serde_json::json!(module_version_code(&date_str));
     update_manifest["date_label"] = serde_json::json!(date_str);
     update_manifest["kernel_asset"] = serde_json::json!(final_zip_name);
     update_manifest["modules_asset"] = serde_json::json!(module_zip_name);
+    update_manifest["manager_version"] = serde_json::json!("1.3.2");
+    update_manifest["manager_sha256"] =
+        serde_json::json!(file_sha256(Path::new("assets/PictersModulesManager.apk"))?);
     fs::write(
-        "picters-update.json",
+        "build-info.json",
         serde_json::to_string_pretty(&update_manifest)?,
     )?;
 
     if do_release {
-        let release_tag = format!(
-            "{}-{}{}-{}",
-            zip_prefix, build_variant_suffix, feature_suffix, date_str
-        );
-        let release_title = format!(
-            "{} {}{} Build ({})",
-            zip_prefix, build_variant_suffix, feature_suffix, date_str
-        );
+        let release_tag = format!("{channel}-{date_str}");
+        let release_title =
+            format!("Picters Xiaomi 17 · {channel} · kernel {kernel_version} · ReSukiSU");
 
         if Path::new(&final_zip_name).exists() {
-            let notes = changelog.as_str();
+            let notes_text = fs::read_to_string("RELEASE-NOTES.md")?;
+            let notes = notes_text.as_str();
             let mut rel_args: Vec<&str> = vec![
                 "gh",
                 "release",
@@ -2880,7 +2881,11 @@ pub fn handle_build(
                     rel_args.push(mz.as_str());
                 }
             }
-            rel_args.push("picters-update.json");
+            rel_args.extend([
+                "build-info.json",
+                "SHA256SUMS",
+                "kernel_source/out/kmi-report.json",
+            ]);
             rel_args.push("--repo");
             rel_args.push(proj.repo.as_str());
             rel_args.push("--title");
@@ -2913,7 +2918,9 @@ pub fn handle_collect_artifacts(artifact_dir: String) -> Result<()> {
     }
 
     for extra_artifact in [
-        "picters-update.json",
+        "build-info.json",
+        "SHA256SUMS",
+        "RELEASE-NOTES.md",
         "kernel_source/out/.config",
         "kernel_source/out/vmlinux.symvers",
         "kernel_source/out/Module.symvers",

@@ -518,6 +518,23 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn captures_only_the_make_version_after_noisy_setup() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("kernel-version-test-{unique}"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("_setup_env.sh"), "echo 'start setup local env'\n").unwrap();
+        fs::write(dir.join("Makefile"), "kernelversion:\n\t@echo 6.12.69\n").unwrap();
+        assert_eq!(
+            capture_make_output(&dir, "kernelversion", true).unwrap(),
+            "6.12.69"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn applies_anykernel_config_to_upstream_template() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -914,7 +931,7 @@ fn run_make_targets(
     source_setup_env: bool,
 ) -> Result<()> {
     if source_setup_env {
-        let mut cmd_str = "source ./_setup_env.sh 2>/dev/null || true && make".to_string();
+        let mut cmd_str = "source ./_setup_env.sh >/dev/null 2>&1 || true && make".to_string();
         for target in targets {
             cmd_str.push(' ');
             cmd_str.push_str(target);
@@ -942,12 +959,12 @@ fn capture_make_output(
 ) -> Result<String> {
     let output = if source_setup_env {
         let cmd = format!(
-            "source ./_setup_env.sh 2>/dev/null || true && make {}",
+            "source ./_setup_env.sh >/dev/null 2>&1 || true && make -s {}",
             target
         );
         run_cmd(&["bash", "-c", &cmd], Some(kernel_source_path), true)?
     } else {
-        run_cmd(&["make", target], Some(kernel_source_path), true)?
+        run_cmd(&["make", "-s", target], Some(kernel_source_path), true)?
     };
 
     Ok(output
@@ -1499,38 +1516,54 @@ fn render_changelog(
     )
 }
 
-/// Print the module_layout CRC so a KMI regression is caught in the build log
-/// WITHOUT flashing. Stock booted baseline is 0xe976b219; any change means
-/// stock vendor modules would fail MODVERSIONS -> bootloop.
-fn dump_kmi_baseline(kernel_source_path: &Path) {
-    let candidates = ["out/Module.symvers", "out/vmlinux.symvers"];
-    for cand in candidates {
-        let symvers = kernel_source_path.join(cand);
-        if !symvers.exists() {
-            continue;
-        }
-        let content = fs::read_to_string(&symvers).unwrap_or_default();
-        for line in content.lines() {
-            let mut fields = line.split('\t');
-            let crc = fields.next().unwrap_or("");
-            let sym = fields.next().unwrap_or("");
-            if sym == "module_layout" {
-                println!(
-                    "KMI-CHECK [{}] module_layout CRC = {} (stock baseline 0xe976b219)",
-                    cand, crc
-                );
-                if crc.eq_ignore_ascii_case("0xe976b219") {
-                    println!("KMI-CHECK: PASS - module_layout matches stock, KMI preserved.");
-                } else {
-                    println!(
-                        "KMI-CHECK: WARNING - module_layout differs from stock! Vendor modules may fail MODVERSIONS; investigate before flashing."
-                    );
-                }
-                return;
-            }
+/// Compare all core symbol CRCs with the known working Picters baseline.
+/// A matching module_layout alone cannot prove vendor-module compatibility.
+fn dump_kmi_baseline(kernel_source_path: &Path) -> Result<bool> {
+    fn symbols(path: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+        Ok(fs::read_to_string(path)?
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let crc = fields.next()?;
+                let name = fields.next()?;
+                Some((name.to_string(), crc.to_string()))
+            })
+            .collect())
+    }
+
+    let baseline = symbols(Path::new("configs/abi/mi17_sm8850.symvers"))?;
+    let built = symbols(&kernel_source_path.join("out/vmlinux.symvers"))?;
+    let mut changed = Vec::new();
+    let mut missing = Vec::new();
+    for (name, expected) in &baseline {
+        match built.get(name) {
+            Some(actual) if actual != expected => changed.push(serde_json::json!({
+                "symbol": name, "baseline_crc": expected, "built_crc": actual
+            })),
+            None => missing.push(name),
+            _ => {}
         }
     }
-    println!("KMI-CHECK: module_layout symbol not found in symvers; cannot verify KMI.");
+    let matching = changed.is_empty() && missing.is_empty();
+    let report = serde_json::json!({
+        "baseline": "Picters 6.12.23, working July 2026 build",
+        "baseline_module_layout": baseline.get("module_layout"),
+        "built_module_layout": built.get("module_layout"),
+        "matches_baseline": matching,
+        "changed_count": changed.len(),
+        "missing_count": missing.len(),
+        "changed": changed,
+        "missing": missing,
+    });
+    fs::write(
+        kernel_source_path.join("out/kmi-report.json"),
+        serde_json::to_string_pretty(&report)?,
+    )?;
+    println!(
+        "KMI-CHECK: {} changed core symbol CRCs, {} missing symbols; matches working baseline: {}",
+        report["changed_count"], report["missing_count"], matching
+    );
+    Ok(matching)
 }
 
 /// Recursively collect *.c / *.h files under `dir`.
@@ -2554,7 +2587,7 @@ pub fn handle_build(
             "Image"
         };
         let mut cmd_str = format!(
-            "source ./_setup_env.sh 2>/dev/null || true && make {} {}",
+            "source ./_setup_env.sh >/dev/null 2>&1 || true && make {} {}",
             jobs, image_targets
         );
         for arg in &make_args {
@@ -2600,7 +2633,12 @@ pub fn handle_build(
         )?;
     }
     if proj.extra_fragment.is_some() {
-        dump_kmi_baseline(&kernel_source_path);
+        let kmi_matches = dump_kmi_baseline(&kernel_source_path)?;
+        if do_release && !kmi_matches {
+            return Err(anyhow!(
+                "Release blocked: core symbol CRCs differ from the working vendor-module baseline; see kmi-report.json"
+            ));
+        }
     }
 
     if let Some(oot) = proj.extra_oot_modules.as_deref() {
@@ -2755,6 +2793,8 @@ pub fn handle_collect_artifacts(artifact_dir: String) -> Result<()> {
         "kernel_source/out/vmlinux.symvers",
         "kernel_source/out/Module.symvers",
         "kernel_source/out/extra_built_modules.txt",
+        "kernel_source/out/arch/arm64/boot/Image",
+        "kernel_source/out/kmi-report.json",
     ] {
         has_artifacts |= copy_artifact_if_exists(Path::new(extra_artifact), &artifact_dir)?;
     }

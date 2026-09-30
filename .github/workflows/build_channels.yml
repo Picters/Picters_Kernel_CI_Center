@@ -2,6 +2,9 @@ name: Build A16 and A17 packages
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   android16:
     name: Android 16 · KMI5

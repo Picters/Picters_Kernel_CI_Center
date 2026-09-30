@@ -154,7 +154,7 @@ jobs:
           ref: ${{ env.BRANCH_TARGET }}
           path: kernel_source
           submodules: recursive
-          token: ${{ secrets.GH_TOKEN }}
+          token: ${{ github.token }}
           # Enough history for the release changelog (git log since the commit
           # the previous release recorded). Depth 1 would leave it empty.
           fetch-depth: 200
@@ -186,7 +186,7 @@ jobs:
 
       - name: Build Kernel
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ env.DO_RELEASE == 'true' && secrets.GH_TOKEN || github.token }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           ARGS=(--project ${{ env.PROJECT }} --branch ${{ env.VARIANT }} --do-release ${{ env.DO_RELEASE }})

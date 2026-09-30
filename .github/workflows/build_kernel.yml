@@ -9,9 +9,13 @@ on:
         options:
           - mi17_sm8850
       branch:
-        description: 'Git Branch/Tag'
+        description: 'Compatibility channel (android17 is unverified KMI6)'
         required: true
-        default: 'resukisu'
+        type: choice
+        options:
+          - android16
+          - android17
+        default: 'android16'
       ksu_variant:
         description: 'Build Mode Override'
         type: choice
@@ -110,7 +114,7 @@ jobs:
           fi
 
           if [ "$variant" = "default" ] || [ -z "$variant" ]; then
-            resolved_variant="$branch"
+            resolved_variant="resukisu"
           else
             resolved_variant="$variant"
           fi

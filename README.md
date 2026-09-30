@@ -1,3 +1,13 @@
+## Picters compatibility channels
+
+Manual builds default to `android16` (6.12.23, KMI5). `android17` contains the experimental 6.12.69/KMI6 tree; Android 17 support has not been established. Variant selection is independent of source branch: both use ReSukiSU.
+
+All dispatch builds are artifacts only. Source `picters-compatibility.json` must match `build.config.constants`. Releases require `status: validated`, an Android SDK, tested exact vendor fingerprints, and the full ABI baseline check. Both channels currently have no validated vendor fingerprints, so releases are blocked.
+
+A successful boot test is required before recording an actual `ro.vendor.build.fingerprint`. Do not infer it from the HyperOS version or SDK. New releases include `picters-update.json` binding the two assets to SDK, KMI generation, channel and tested vendor identities. Manager 1.3.3 rejects releases without this metadata and rechecks before installing.
+
+Old managers also scan prereleases, so KMI6 module names deliberately omit `OOT-Modules`; old managers ignore them. KMI5 ZIP installers check Android SDK and, once validated, vendor fingerprint before modifying boot or installing modules. Experimental artifacts are for manual testing only and do not establish firmware compatibility.
+
 # Picters Kernel CI Center
 
 CI/CD that builds the **Picters kernel** (with extra out-of-tree modules) and the **Modules pack**

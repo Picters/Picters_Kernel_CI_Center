@@ -518,6 +518,26 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn compatibility_blocks_unknown_vendor_and_experimental_releases() {
+        let mut manifest = serde_json::json!({
+            "status": "experimental-unverified", "android_sdk": 36,
+            "validated_vendor_fingerprints": []
+        });
+        assert!(!release_compatibility_valid(&manifest));
+        manifest["status"] = serde_json::json!("validated");
+        assert!(!release_compatibility_valid(&manifest));
+        manifest["validated_vendor_fingerprints"] =
+            serde_json::json!(["Xiaomi/pudding/firmware:16/test"]);
+        assert!(release_compatibility_valid(&manifest));
+        let guard = compatibility_install_guard(&manifest).unwrap();
+        assert!(guard.contains("ro.build.version.sdk"));
+        assert!(guard.contains("ro.vendor.build.fingerprint"));
+        assert!(guard.contains("abort"));
+        manifest["validated_vendor_fingerprints"] = serde_json::json!(["$(id)"]);
+        assert!(compatibility_install_guard(&manifest).is_err());
+    }
+
+    #[test]
     fn captures_only_the_make_version_after_noisy_setup() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1346,6 +1366,8 @@ fn build_oot_module_zip(
             "id=picters-modules-pack\nname=Picters Modules Pack\nversion={version_str}-{date_str}\nversionCode={version_code}\nauthor=Picters\ndescription=Extra kernel drivers — managed from the Picters Modules Manager app.\n"
         ),
     )?;
+    let compatibility = load_compatibility(Path::new("kernel_source"))?;
+    let install_guard = compatibility_install_guard(&compatibility)?;
     let apk_ui_line = if apk_embedded {
         "ui_print \"- Picters Modules Manager staged as a system app — reboot to activate\"\n"
     } else {
@@ -1354,7 +1376,7 @@ fn build_oot_module_zip(
     fs::write(
         stage.join("customize.sh"),
         format!(
-            "#!/sbin/sh\nSKIPUNZIP=0\nui_print \"- Picters Modules pack\"\nKO=$(ls \"$MODPATH/system/lib/modules/\"*.ko 2>/dev/null | wc -l)\nui_print \"- $KO drivers staged (non-Wi-Fi load on boot)\"\nset_perm_recursive \"$MODPATH\" 0 0 0755 0644\nfor s in action.sh service.sh; do [ -f \"$MODPATH/$s\" ] && chmod 0755 \"$MODPATH/$s\"; done\n# Settings (perf profile, boot-load flag, per-adapter tx power) live in\n# /data/adb/picters_modules_manager, outside this module dir — an update\n# replaces the module wholesale but never touches them.\nmkdir -p /data/adb/picters_modules_manager\nui_print \"- Your profile and settings are kept\"\n{apk_ui_line}ui_print \"- Use the module Action button to open Picters Modules Manager\"\n"
+            "#!/sbin/sh\n{install_guard}SKIPUNZIP=0\nui_print \"- Picters Modules pack\"\nKO=$(ls \"$MODPATH/system/lib/modules/\"*.ko 2>/dev/null | wc -l)\nui_print \"- $KO drivers staged (non-Wi-Fi load on boot)\"\nset_perm_recursive \"$MODPATH\" 0 0 0755 0644\nfor s in action.sh service.sh; do [ -f \"$MODPATH/$s\" ] && chmod 0755 \"$MODPATH/$s\"; done\n# Settings (perf profile, boot-load flag, per-adapter tx power) live in\n# /data/adb/picters_modules_manager, outside this module dir — an update\n# replaces the module wholesale but never touches them.\nmkdir -p /data/adb/picters_modules_manager\nui_print \"- Your profile and settings are kept\"\n{apk_ui_line}ui_print \"- Use the module Action button to open Picters Modules Manager\"\n"
         ),
     )?;
     fs::write(
@@ -1514,6 +1536,65 @@ fn render_changelog(
          are its changes too.\n\n\
          {CHANGELOG_SHA_MARK} {head} -->\n"
     )
+}
+
+/// Channel metadata comes from the checked-out source, never from the variant name.
+fn load_compatibility(source: &Path) -> Result<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+        source.join("picters-compatibility.json"),
+    )?)?;
+    let constants = fs::read_to_string(source.join("build.config.constants"))?;
+    let generation = constants.lines().find_map(|line| {
+        line.strip_prefix("KMI_GENERATION=")
+            .and_then(|v| v.parse::<u64>().ok())
+    });
+    if value["schema"] != 1
+        || generation.is_none()
+        || generation != value["kmi_generation"].as_u64()
+        || !matches!(value["channel"].as_str(), Some("android16" | "android17"))
+    {
+        return Err(anyhow!(
+            "Source compatibility metadata does not match its KMI generation"
+        ));
+    }
+    Ok(value)
+}
+
+fn release_compatibility_valid(value: &serde_json::Value) -> bool {
+    value["status"] == "validated"
+        && value["android_sdk"].as_u64().is_some()
+        && value["validated_vendor_fingerprints"]
+            .as_array()
+            .is_some_and(|v| {
+                !v.is_empty() && v.iter().all(|s| s.as_str().is_some_and(|s| !s.is_empty()))
+            })
+}
+
+/// Run before AnyKernel touches boot; also used by the standalone module installer.
+fn compatibility_install_guard(value: &serde_json::Value) -> Result<String> {
+    let mut guard = String::new();
+    if let Some(sdk) = value["android_sdk"].as_u64() {
+        guard.push_str(&format!("[ \"$(getprop ro.build.version.sdk)\" = \"{sdk}\" ] || abort 'Incompatible Android SDK; boot was not modified'\n"));
+    }
+    if let Some(fingerprints) = value["validated_vendor_fingerprints"].as_array() {
+        if !fingerprints.is_empty() {
+            let mut allowed = Vec::new();
+            for fp in fingerprints {
+                let fp = fp
+                    .as_str()
+                    .ok_or_else(|| anyhow!("Invalid vendor fingerprint"))?;
+                if !fp
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "/:._+-".contains(c))
+                {
+                    return Err(anyhow!("Unsafe vendor fingerprint"));
+                }
+                allowed.push(format!("'{fp}'"));
+            }
+            guard.push_str(&format!("case \"$(getprop ro.vendor.build.fingerprint)\" in\n  {}) ;;\n  *) abort 'Unvalidated vendor firmware; boot was not modified' ;;\nesac\n", allowed.join("|")));
+        }
+    }
+    Ok(guard)
 }
 
 /// Compare all core symbol CRCs with the known working Picters baseline.
@@ -2101,6 +2182,13 @@ pub fn handle_build(
         return Err(anyhow!("Kernel source not found at ./kernel_source"));
     }
 
+    let compatibility = load_compatibility(&kernel_source_path)?;
+    if do_release && !release_compatibility_valid(&compatibility) {
+        return Err(anyhow!(
+            "Release blocked: channel has no validated vendor compatibility; artifact builds remain available"
+        ));
+    }
+
     let target_soc_str = project_key.split('_').nth(1).unwrap_or("unknown");
     let is_sm8850 = target_soc_str == "sm8850";
 
@@ -2615,6 +2703,19 @@ pub fn handle_build(
         apply_anykernel_config(Path::new("AnyKernel3"), &anykernel_config)?;
     }
 
+    let guard = compatibility_install_guard(&compatibility)?;
+    let ak_path = Path::new("AnyKernel3/anykernel.sh");
+    let ak_script = fs::read_to_string(ak_path)?;
+    // Insert immediately after core initialization, before dump_boot / write_boot.
+    let core_line = ak_script
+        .lines()
+        .find(|line| line.contains(". tools/ak3-core.sh"))
+        .ok_or_else(|| anyhow!("AnyKernel core initialization marker missing"))?;
+    fs::write(
+        ak_path,
+        ak_script.replacen(core_line, &format!("{core_line}\n{guard}"), 1),
+    )?;
+
     let image_path = kernel_source_path.join("out/arch/arm64/boot/Image");
     if !image_path.exists() {
         return Err(anyhow!("Image not found at {:?}", image_path));
@@ -2657,7 +2758,14 @@ pub fn handle_build(
         .with_timezone(&hkt)
         .format("%Y%m%d-%H%M")
         .to_string();
-    let zip_prefix = proj.zip_name_prefix.as_deref().unwrap_or("Kernel");
+    // Older managers scan every release (including prereleases) for OOT-Modules.
+    // KMI6 assets must not match their parser; only manifest-aware clients see them.
+    let experimental = compatibility["channel"] == "android17";
+    let zip_prefix = if experimental {
+        "Mi17-KMI6"
+    } else {
+        proj.zip_name_prefix.as_deref().unwrap_or("Kernel")
+    };
     let feature_suffix = if feature_suffixes.is_empty() {
         String::new()
     } else {
@@ -2709,9 +2817,14 @@ pub fn handle_build(
 
     // Standalone, manager-agnostic OOT-modules zip (extra-modules projects only).
     let module_zip_name: Option<String> = if proj.extra_fragment.is_some() {
+        let modules_label = if experimental {
+            "Modules"
+        } else {
+            "OOT-Modules"
+        };
         let name = format!(
-            "{}-OOT-Modules-{}{}-{}.zip",
-            zip_prefix, clean_localversion, feature_suffix, date_str
+            "{}-{}-{}{}-{}.zip",
+            zip_prefix, modules_label, clean_localversion, feature_suffix, date_str
         );
         let version_str = format!("{}-{}", kernel_version, clean_localversion);
         match build_oot_module_zip(&name, &version_str, &date_str, &changelog) {
@@ -2731,6 +2844,16 @@ pub fn handle_build(
     } else {
         None
     };
+
+    let mut update_manifest = compatibility.clone();
+    update_manifest["version_code"] = serde_json::json!(module_version_code(&date_str));
+    update_manifest["date_label"] = serde_json::json!(date_str);
+    update_manifest["kernel_asset"] = serde_json::json!(final_zip_name);
+    update_manifest["modules_asset"] = serde_json::json!(module_zip_name);
+    fs::write(
+        "picters-update.json",
+        serde_json::to_string_pretty(&update_manifest)?,
+    )?;
 
     if do_release {
         let release_tag = format!(
@@ -2757,6 +2880,7 @@ pub fn handle_build(
                     rel_args.push(mz.as_str());
                 }
             }
+            rel_args.push("picters-update.json");
             rel_args.push("--repo");
             rel_args.push(proj.repo.as_str());
             rel_args.push("--title");
@@ -2789,6 +2913,7 @@ pub fn handle_collect_artifacts(artifact_dir: String) -> Result<()> {
     }
 
     for extra_artifact in [
+        "picters-update.json",
         "kernel_source/out/.config",
         "kernel_source/out/vmlinux.symvers",
         "kernel_source/out/Module.symvers",

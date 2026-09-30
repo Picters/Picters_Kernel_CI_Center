@@ -82,6 +82,9 @@ jobs:
       ARTIFACT_DIR: build_artifacts
     steps:
       - uses: actions/checkout@v7
+        with:
+          repository: Picters/Picters_Kernel_CI_Center
+          ref: main
 
       - name: Resolve Build Parameters
         run: |

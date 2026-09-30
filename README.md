@@ -1,47 +1,36 @@
-## Пакеты Picters для Xiaomi 17
-
-| Канал | База | Ядро | Модули и приложение |
-| --- | --- | --- | --- |
-| **A16** | Linux 6.12.23 · KMI 5 · ReSukiSU | `Mi17_Kernel-6.12.23-android16-…-YYYYMMDD-HHMM.zip` | `Mi17_OOTMODULES-6.12.23-android16-…-YYYYMMDD-HHMM.zip` |
-| **A17 — экспериментальный** | Linux 6.12.69 · KMI 6 · ReSukiSU | `Mi17_Kernel-6.12.69-android17-…-YYYYMMDD-HHMM.zip` | `Mi17_OOTMODULES-6.12.69-android17-…-YYYYMMDD-HHMM.zip` |
-
-Поддержка Android 17 новой базой пока не подтверждена. На Android 16 / OS3.0.315.0.WPCCNXM она не загрузилась. Версия Android сама по себе не гарантирует совместимость с vendor-модулями.
-
-Каждый OOT-пакет содержит драйверы **только для своего ядра** и подписанный Picters Modules Manager **1.3.2**. Приложение показывает новые релизы и открывает GitHub; скачивание и установка выполняются вручную. Старый менеджер 1.3.1 не распознаёт новые имена пакетов.
-
-### Установка
-
-1. Скачайте ядро и OOT-пакет из одного релиза своего канала.
-2. Установите ядро и загрузите телефон.
-3. Установите соответствующий OOT-пакет в KernelSU/Magisk и перезагрузите телефон.
-
-Установщик модулей проверяет точную строку ядра. При смене ядра boot-service пропускает загрузку чужих драйверов. Настройки приложения сохраняются.
-
-### Сборка
-
-`Build A16 and A17 packages` собирает оба канала и сохраняет артефакты без публикации. Для одного канала используйте `Build Kernel`. Все автоматические dispatch-сборки также создают только артефакты.
-
-APK хранится в `assets/` вместе с SHA-256; ключ подписи в репозиторий не попадает. Сборка проверяет SHA-256 и не скачивает APK из отдельного релиза приложения.
-
-Каждая сборка включает `SHA256SUMS`, `build-info.json`, `kmi-report.json` и `RELEASE-NOTES.md`. Заголовки будущих релизов разделены по A16/A17, теги: `A16-YYYYMMDD-HHMM` / `A17-YYYYMMDD-HHMM`. Публикация требует отдельного запуска с разрешённым релизом и подтверждённой совместимостью vendor/ABI.
-
-
 # Picters Kernel CI Center
 
-CI/CD that builds the **Picters kernel** (with extra out-of-tree modules) and the **Modules pack**
-for the **Xiaomi 17 Series** (`sm8850`, *pudding*) — a Rust core (`ci_core`) driving source sync,
-toolchain, ReSukiSU/SuSFS, the build and packaging via GitHub Actions.
+Build and package Picters kernels for Xiaomi 17 (`pudding`, SM8850), with ReSukiSU, SUSFS, extra drivers and Picters Modules Manager.
 
-Each release ships two assets: the flashable kernel (AnyKernel3) and a manager-agnostic
-KernelSU/Magisk **Modules pack** (Wi-Fi injection, BT, CAN, SDR/DVB, NTFS). Non-Wi-Fi drivers load
-at boot; Wi-Fi injection stays off until switched on in the Picters Modules Manager app.
+## Compatibility channels
+
+| Channel | Base | Kernel archive | Matching modules archive |
+| --- | --- | --- | --- |
+| **A16** | Linux 6.12.23 · KMI 5 · ReSukiSU | `Mi17_Kernel-6.12.23-android16-…-YYYYMMDD-HHMM.zip` | `Mi17_OOTMODULES-6.12.23-android16-…-YYYYMMDD-HHMM.zip` |
+| **A17 — experimental** | Linux 6.12.69 · KMI 6 · ReSukiSU | `Mi17_Kernel-6.12.69-android17-…-YYYYMMDD-HHMM.zip` | `Mi17_OOTMODULES-6.12.69-android17-…-YYYYMMDD-HHMM.zip` |
+
+Android 17 compatibility has not been established. The KMI6 base failed to boot Android 16 firmware OS3.0.315.0.WPCCNXM. Android version alone cannot establish vendor-module compatibility.
+
+Each OOT pack contains modules compiled for its exact kernel and signed **Picters Modules Manager 1.3.2**. The original blue **Update** chip appears only for a newer release in the installed channel and opens GitHub. Downloads, APK/module installation and kernel flashing have been removed from the app. Manager 1.3.1 does not recognize the new OOTMODULES filenames.
+
+## Manual installation
+
+1. Download both archives from the same release and channel.
+2. Install and boot the kernel using an AnyKernel3-compatible installer.
+3. Install its matching OOT pack through KernelSU/Magisk and reboot. The manager is delivered as a system app.
+
+The OOT installer checks the exact running kernel release. Its boot service skips loading drivers after a kernel change. App settings survive module updates. Non-Wi-Fi boot loading is optional; Wi-Fi injection remains off until enabled in the manager.
 
 ## Build
 
-Dispatch **Build Kernel** (`project=mi17_sm8850`, `branch=resukisu`) from the Actions tab. After
-editing anything under `ci_core_rs/`, run **Build CI Core** first and let it finish.
+Run **Build A16 and A17 packages** to build both channels, or **Build Kernel** for one channel (`project=mi17_sm8850`, `branch=android16` or `android17`). Both channels use only ReSukiSU. The CI core is compiled from source during each build.
+
+Kernel pushes call this reusable workflow directly; no repository-dispatch token is required. The workflow explicitly checks out this CI repository for its build tools. Automatic builds and the dual-channel workflow produce artifacts only.
+
+The signed public APK is pinned in `assets/` with its SHA-256. The private keystore remains outside Git. Packaging verifies the APK checksum and never fetches a separate application release.
+
+Each build includes both ZIPs, `SHA256SUMS`, `build-info.json`, `kmi-report.json` and `RELEASE-NOTES.md`. Future releases use tags `A16-YYYYMMDD-HHMM` or `A17-YYYYMMDD-HHMM`. Publication requires an explicit release build, validated vendor compatibility and the ABI check.
 
 ## Credits
 
-Base CI & kernel: **Kokuban / YuzakiKokuban** · Root: **ReSukiSU / KernelSU** · SuSFS:
-**simonpunk** · Injection drivers: **aircrack-ng**, **morrownr**.
+Base CI & kernel: **Kokuban / YuzakiKokuban** · Root: **ReSukiSU / KernelSU** · SUSFS: **simonpunk** · USB Wi-Fi drivers: **aircrack-ng**, **morrownr**.

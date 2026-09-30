@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::{FixedOffset, Utc};
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -15,6 +15,18 @@ use crate::utils::{
 
 const ANYKERNEL_REPO: &str = "https://github.com/YuzakiKokuban/AnyKernel3.git";
 const ANYKERNEL_BRANCH: &str = "master";
+const SUSFS_KCONFIG_ENTRIES: &[(&str, &str)] = &[
+    ("CONFIG_KSU_SUSFS", "y"),
+    ("CONFIG_KSU_SUSFS_SUS_PATH", "y"),
+    ("CONFIG_KSU_SUSFS_SUS_MOUNT", "y"),
+    ("CONFIG_KSU_SUSFS_SUS_KSTAT", "y"),
+    ("CONFIG_KSU_SUSFS_SPOOF_UNAME", "y"),
+    ("CONFIG_KSU_SUSFS_ENABLE_LOG", "y"),
+    ("CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS", "y"),
+    ("CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG", "y"),
+    ("CONFIG_KSU_SUSFS_OPEN_REDIRECT", "y"),
+    ("CONFIG_KSU_SUSFS_SUS_MAP", "y"),
+];
 
 fn verify_toolchain_checksum(
     url: &str,
@@ -979,6 +991,11 @@ fn prepare_sm8850_build(
     ];
     if enable_ksu {
         entries.push(("CONFIG_KSU", "y"));
+        entries.push(("CONFIG_KSU_MULTI_MANAGER_SUPPORT", "y"));
+        entries.push((
+            "CONFIG_KSU_FULL_NAME_FORMAT",
+            "\"%TAG_NAME%-%COMMIT_SHA%-PictersKernel@%REPO_NAME%\"",
+        ));
     }
     update_kconfig_file(&defconfig_file, &entries)
 }
@@ -1350,7 +1367,12 @@ fn build_oot_module_zip(
         let _ = fs::remove_file(&out_zip);
     }
     run_cmd(
-        &["zip", "-r9", out_zip.to_str().unwrap_or(module_zip_name), "."],
+        &[
+            "zip",
+            "-r9",
+            out_zip.to_str().unwrap_or(module_zip_name),
+            ".",
+        ],
         Some(stage.as_path()),
         false,
     )?;
@@ -1855,7 +1877,6 @@ fn patch_realtek_connect_null_bss(subdir: &Path) {
     }
 }
 
-
 /// The aircrack forks report a DISCONNECT to cfg80211 as a SUCCESSFUL CONNECT
 /// when the disconnect carries no reason code. `rtw_cfg80211_indicate_disconnect()`
 /// passes its `reason` straight through as the connect *status*, and
@@ -1991,13 +2012,14 @@ fn build_extra_oot_modules(
             }
         }
 
-        if let Err(err) =
-            run_make_targets(kernel_source_path, &oot_env, &args, &["modules"], source_setup_env)
-        {
-            println!(
-                "OOT: build failed for {} ({}), skipping",
-                m.subdir, err
-            );
+        if let Err(err) = run_make_targets(
+            kernel_source_path,
+            &oot_env,
+            &args,
+            &["modules"],
+            source_setup_env,
+        ) {
+            println!("OOT: build failed for {} ({}), skipping", m.subdir, err);
             continue;
         }
 
@@ -2236,11 +2258,17 @@ pub fn handle_build(
         );
     }
 
+    let pinned_ksu = if is_resukisu_variant(&branch) {
+        fs::read_to_string(kernel_source_path.join("KERNELSU_VERSION.txt"))
+            .context("Missing KERNELSU_VERSION.txt for the pinned ReSukiSU revision")?
+    } else {
+        String::new()
+    };
     let resukisu_setup_arg = resukisu_setup_arg
         .as_deref()
         .map(str::trim)
         .filter(|arg| !arg.is_empty())
-        .unwrap_or("main");
+        .unwrap_or(pinned_ksu.trim());
 
     let setup_url = match branch.as_str() {
         _ if is_resukisu_variant(&branch) => Some((
@@ -2263,6 +2291,9 @@ pub fn handle_build(
                 .as_ref()
                 .ok_or_else(|| anyhow!("Project {} does not define a SuSFS source", project_key))?;
             apply_susfs_overlay(&kernel_source_path, susfs)?;
+            let defconfig_file =
+                kernel_source_path.join(format!("arch/arm64/configs/{}", proj.defconfig));
+            update_kconfig_file(&defconfig_file, SUSFS_KCONFIG_ENTRIES)?;
             feature_suffixes.push("susfs".to_string());
         } else {
             println!(

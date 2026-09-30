@@ -10,13 +10,15 @@ jobs:
       - name: Trigger build in kernel-ci repository
         uses: peter-evans/repository-dispatch@v3
         with:
-          repository: __REPO_OWNER__/Kokuban_Kernel_CI_Center
+          repository: __REPO_OWNER__/Picters_Kernel_CI_Center
           token: ${{ secrets.CI_TOKEN }}
           event-type: build-kernel
           client-payload: >-
             {
               "project": "__PROJECT_KEY__",
               "branch": "${{ github.ref_name }}",
+              "do_release": false,
               "apply_susfs": true,
-              "apply_bbg": true
+              "apply_bbg": false,
+              "apply_hybridmount": true
             }

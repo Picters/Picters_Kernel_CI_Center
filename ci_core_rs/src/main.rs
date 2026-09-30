@@ -557,12 +557,12 @@ fn handle_setup(
     let trigger_tpl = fs::read_to_string(get_template_path("trigger-central-build.yml.tpl"))?;
 
     run_cmd(
-        &["git", "config", "--global", "user.name", "Kokuban-Bot"],
+        &["git", "config", "--global", "user.name", "Picters"],
         None,
         false,
     )?;
     run_cmd(
-        &["git", "config", "--global", "user.email", "bot@kokuban.dev"],
+        &["git", "config", "--global", "user.email", "imelikov3@bk.ru"],
         None,
         false,
     )?;
@@ -926,12 +926,12 @@ fn handle_update(
     }
 
     run_cmd(
-        &["git", "config", "user.name", "Kokuban-Bot"],
+        &["git", "config", "user.name", "Picters"],
         Some(&target_dir),
         false,
     )?;
     run_cmd(
-        &["git", "config", "user.email", "bot@kokuban.dev"],
+        &["git", "config", "user.email", "imelikov3@bk.ru"],
         Some(&target_dir),
         false,
     )?;

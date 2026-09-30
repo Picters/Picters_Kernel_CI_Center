@@ -30,8 +30,8 @@ jobs:
       - name: Commit Updated Tracker
         if: steps.watcher.outputs.found_updates == 'true'
         run: |
-          git config --global user.name "Kokuban-Watcher"
-          git config --global user.email "watcher@kokuban.dev"
+          git config --global user.name "Picters"
+          git config --global user.email "imelikov3@bk.ru"
           git add configs/upstream_commits.json
           git commit -m "ci: update upstream records"
           git push

@@ -11,7 +11,7 @@ on:
       branch:
         description: 'Git Branch/Tag'
         required: true
-        default: 'main'
+        default: 'resukisu'
       ksu_variant:
         description: 'Build Mode Override'
         type: choice
@@ -23,7 +23,7 @@ on:
       do_release:
         description: 'Create Release'
         type: boolean
-        default: true
+        default: false
       custom_localversion:
         description: 'Custom Localversion Override'
         type: string
@@ -57,7 +57,7 @@ on:
         default: 'default'
       do_release:
         type: boolean
-        default: true
+        default: false
       custom_localversion:
         type: string
         default: ''
@@ -87,7 +87,7 @@ jobs:
             project="${{ github.event.client_payload.project }}"
             branch="${{ github.event.client_payload.branch }}"
             variant="default"
-            release="true"
+            release="false"
             custom_localversion=""
             resukisu_setup_arg=""
             apply_susfs="${{ github.event.client_payload.apply_susfs }}"
@@ -131,12 +131,18 @@ jobs:
             echo "ARTIFACT_NAME=$artifact_name"
           } >> "$GITHUB_ENV"
 
-      - name: Download CI Core
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache CI Core
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ci_core_rs
+
+      - name: Build CI Core from this checkout
         run: |
-          gh release download ci-core-latest -p "kokuban_ci_core"
-          chmod +x kokuban_ci_core
+          cargo build --release --locked --manifest-path ci_core_rs/Cargo.toml
+          cp ci_core_rs/target/release/kokuban_ci_core ./kokuban_ci_core
 
       - name: Parse Configuration
         run: ./kokuban_ci_core parse --project ${{ env.PROJECT }}
@@ -178,7 +184,7 @@ jobs:
             fi
           done
 
-      - name: Build and Release
+      - name: Build Kernel
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

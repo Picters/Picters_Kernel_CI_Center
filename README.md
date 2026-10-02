@@ -9,9 +9,9 @@ Build and package Picters kernels for Xiaomi 17 (`pudding`, SM8850), with ReSuki
 | **A16** | Linux 6.12.23 · KMI 5 · ReSukiSU | `Mi17_Kernel-6.12.23-android16-…-YYYYMMDD-HHMM.zip` | `Mi17_OOTMODULES-6.12.23-android16-…-YYYYMMDD-HHMM.zip` |
 | **A17 — experimental** | Linux 6.12.69 · KMI 6 · ReSukiSU | `Mi17_Kernel-6.12.69-android17-…-YYYYMMDD-HHMM.zip` | `Mi17_OOTMODULES-6.12.69-android17-…-YYYYMMDD-HHMM.zip` |
 
-Android 17 compatibility has not been established. The KMI6 base failed to boot Android 16 firmware OS3.0.315.0.WPCCNXM. Android version alone cannot establish vendor-module compatibility.
+Install the matching pair for your Android version; the A17 kernel and app have not been tested on Android 17 firmware.
 
-Each OOT pack contains modules compiled for its exact kernel and signed **Picters Modules Manager 1.3.2**. The original blue **Update** chip appears only for a newer release in the installed channel and opens GitHub. Downloads, APK/module installation and kernel flashing have been removed from the app. Manager 1.3.1 does not recognize the new OOTMODULES filenames.
+Each OOT pack contains modules compiled for its exact kernel and signed **Picters Modules Manager**. The original blue **Update** chip appears only for a newer release in the installed channel and opens the latest GitHub release. Downloads, APK/module installation and kernel flashing have been removed from the app. Manager 1.3.1 does not recognize the new OOTMODULES filenames.
 
 ## Manual installation
 
@@ -29,7 +29,7 @@ Kernel pushes call this reusable workflow directly; no repository-dispatch token
 
 The signed public APK is pinned in `assets/` with its SHA-256. The private keystore remains outside Git. Packaging verifies the APK checksum and never fetches a separate application release.
 
-Each build includes both ZIPs, `SHA256SUMS`, `build-info.json`, `kmi-report.json` and `RELEASE-NOTES.md`. Future releases use tags `A16-YYYYMMDD-HHMM` or `A17-YYYYMMDD-HHMM`. Publication requires an explicit release build, validated vendor compatibility and the ABI check.
+Each build includes both ZIPs, `SHA256SUMS`, `build-info.json`, `kmi-report.json` and `RELEASE-NOTES.md`. Manually published releases group both Android pairs under `Mi17_Kernel-ReSuki-susfs-YYYYMMDD-HHMM`. Automated publication still requires validated vendor compatibility and the ABI check.
 
 ## Credits
 

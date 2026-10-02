@@ -1372,7 +1372,7 @@ fn build_oot_module_zip(
     fs::write(
         stage.join("module.prop"),
         format!(
-            "id=picters-modules-pack\nname=Picters {channel} OOT Modules\nreleaseChannel={channel}\nversion={version_str}-{date_str}\nversionCode={version_code}\nauthor=Picters\ndescription=Matching {channel} kernel drivers with Picters Modules Manager 1.3.2. Install manually after booting the paired kernel.\n"
+            "id=picters-modules-pack\nname=Picters Modules Pack\nreleaseChannel={channel}\nversion={version_str}-{date_str}\nversionCode={version_code}\nauthor=Picters\ndescription=Extra kernel drivers — managed from the Picters Modules Manager app.\n"
         ),
     )?;
     let install_guard = compatibility_install_guard(&compatibility)?;

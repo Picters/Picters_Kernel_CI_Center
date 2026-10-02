@@ -518,6 +518,36 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn source_rejects_kmi6_even_on_android16() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("picters-kmi-source-{unique}"));
+        fs::create_dir_all(&dir).unwrap();
+        let mut manifest = serde_json::json!({
+            "schema": 1, "channel": "android16", "android_sdk": 36,
+            "kmi_generation": 5
+        });
+        fs::write(dir.join("picters-compatibility.json"), manifest.to_string()).unwrap();
+        fs::write(
+            dir.join("build.config.constants"),
+            "BRANCH=android16-6.12\nKMI_GENERATION=5\n",
+        )
+        .unwrap();
+        assert!(load_compatibility(&dir).is_ok());
+        manifest["kmi_generation"] = serde_json::json!(6);
+        fs::write(dir.join("picters-compatibility.json"), manifest.to_string()).unwrap();
+        fs::write(
+            dir.join("build.config.constants"),
+            "BRANCH=android16-6.12\nKMI_GENERATION=6\n",
+        )
+        .unwrap();
+        assert!(load_compatibility(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn compatibility_blocks_unknown_vendor_and_experimental_releases() {
         let mut manifest = serde_json::json!({
             "status": "experimental-unverified", "android_sdk": 36,
@@ -1337,11 +1367,7 @@ fn build_oot_module_zip(
     // versionCode is a monotonic build stamp (see module_version_code); the app
     // compares it against the latest release to gate features on a matching kernel.
     let compatibility = load_compatibility(Path::new("kernel_source"))?;
-    let channel = if compatibility["channel"] == "android16" {
-        "A16"
-    } else {
-        "A17"
-    };
+    let channel = "A16";
     let version_code = module_version_code(date_str);
     fs::write(
         stage.join("module.prop"),
@@ -1543,12 +1569,13 @@ fn load_compatibility(source: &Path) -> Result<serde_json::Value> {
             .and_then(|v| v.parse::<u64>().ok())
     });
     if value["schema"] != 1
-        || generation.is_none()
+        || generation != Some(5)
         || generation != value["kmi_generation"].as_u64()
-        || !matches!(value["channel"].as_str(), Some("android16" | "android17"))
+        || value["channel"] != "android16"
+        || value["android_sdk"] != 36
     {
         return Err(anyhow!(
-            "Source compatibility metadata does not match its KMI generation"
+            "Only Android 16 / KMI 5 sources are supported; check compatibility metadata"
         ));
     }
     Ok(value)
@@ -2753,19 +2780,9 @@ pub fn handle_build(
         .format("%Y%m%d-%H%M")
         .to_string();
     // Fixed names deliberately do not match the legacy manager's OOT-Modules
-    // marker or timestamped ZIP parser, for either compatibility channel.
-    let channel = if compatibility["channel"] == "android16" {
-        "A16"
-    } else {
-        "A17"
-    };
+    // marker or timestamped ZIP parser.
     let clean_localversion = localversion.trim_start_matches('-');
-    let android_label = if channel == "A16" {
-        "android16"
-    } else {
-        "android17"
-    };
-    let asset_localversion = clean_localversion.replacen("android16", android_label, 1);
+    let asset_localversion = clean_localversion;
     let feature_suffix = if feature_suffixes.is_empty() {
         String::new()
     } else {
@@ -2834,20 +2851,8 @@ pub fn handle_build(
         None
     };
 
-    let abi_report: serde_json::Value = serde_json::from_str(&fs::read_to_string(
-        kernel_source_path.join("out/kmi-report.json"),
-    )?)?;
-    let notice = if channel == "A17" {
-        "**Experimental KMI6 build. Android 17/vendor compatibility is unverified. This base failed to boot OS3.0.315.0.WPCCNXM (Android 16).**"
-    } else {
-        "Android 16 / KMI5 base. Confirm firmware compatibility before installing."
-    };
-    let modules_name = module_zip_name
-        .as_deref()
-        .ok_or_else(|| anyhow!("Required OOT pack missing"))?;
     let release_notes = format!(
-        "# Picters Xiaomi 17 — {channel}\n\n{notice}\n\n| Package | Contents |\n| --- | --- |\n| `{final_zip_name}` | Kernel {kernel_version}, ReSukiSU, Picters frequency driver and extra drivers |\n| `{modules_name}` | Modules compiled for this exact kernel, signed Picters Modules Manager 1.3.2 |\n\n## Manual installation\n\n1. Download both files from this same {channel} release.\n2. Install the kernel with your preferred AnyKernel3-compatible installer and boot it.\n3. Install the matching OOTMODULES pack through KernelSU/Magisk, then reboot. The manager is provided as a system app.\n\nThe manager opens GitHub releases and never downloads, installs or flashes updates. Old manager 1.3.1 cannot discover this package format. Do not mix A16 and A17 packs. The OOT installer checks the running kernel; its boot service skips loading drivers on a different kernel.\n\n## Build verification\n\nKMI generation: {}. Matches known working core ABI baseline: {}. Full report: `kmi-report.json`. This does not replace a successful boot test.\n\n{}",
-        compatibility["kmi_generation"], abi_report["matches_baseline"], changelog
+        "## Changes:\nFrequency fixes and updated Modules Manager.\n\n## Build\n- Kernel {kernel_version} · Android 16 · KMI 5\n- Built {date_str}\n\n{changelog}"
     );
     fs::write("RELEASE-NOTES.md", release_notes)?;
     fs::write(
@@ -2882,9 +2887,8 @@ pub fn handle_build(
     )?;
 
     if do_release {
-        let release_tag = format!("{channel}-{date_str}");
-        let release_title =
-            format!("Picters Xiaomi 17 · {channel} · kernel {kernel_version} · ReSukiSU");
+        let release_tag = format!("Mi17_Kernel-ReSuki-susfs-{date_str}");
+        let release_title = format!("Mi17_Kernel ReSuki-susfs Build ({date_str})");
 
         if Path::new(&final_zip_name).exists() {
             let notes_text = fs::read_to_string("RELEASE-NOTES.md")?;

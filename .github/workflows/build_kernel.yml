@@ -9,12 +9,11 @@ on:
         options:
           - mi17_sm8850
       branch:
-        description: 'Compatibility channel (android17 is unverified KMI6)'
+        description: 'Android 16 / KMI 5 source branch'
         required: true
         type: choice
         options:
           - android16
-          - android17
         default: 'android16'
       ksu_variant:
         description: 'Build Mode Override'

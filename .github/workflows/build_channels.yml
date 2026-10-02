@@ -1,4 +1,4 @@
-name: Build A16 and A17 packages
+name: Build KMI5 packages
 on:
   workflow_dispatch:
 
@@ -12,17 +12,6 @@ jobs:
     with:
       project: mi17_sm8850
       branch: android16
-      ksu_variant: resukisu
-      do_release: false
-      apply_susfs: true
-      apply_bbg: false
-    secrets: inherit
-  android17:
-    name: Android 17 · experimental KMI6
-    uses: ./.github/workflows/build_kernel.yml
-    with:
-      project: mi17_sm8850
-      branch: android17
       ksu_variant: resukisu
       do_release: false
       apply_susfs: true

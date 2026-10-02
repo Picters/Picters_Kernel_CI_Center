@@ -518,32 +518,34 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn source_rejects_kmi6_even_on_android16() {
+    fn source_checks_both_channels_sdk_and_kmi() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("picters-kmi-source-{unique}"));
         fs::create_dir_all(&dir).unwrap();
-        let mut manifest = serde_json::json!({
-            "schema": 1, "channel": "android16", "android_sdk": 36,
-            "kmi_generation": 5
-        });
-        fs::write(dir.join("picters-compatibility.json"), manifest.to_string()).unwrap();
-        fs::write(
-            dir.join("build.config.constants"),
-            "BRANCH=android16-6.12\nKMI_GENERATION=5\n",
-        )
-        .unwrap();
-        assert!(load_compatibility(&dir).is_ok());
-        manifest["kmi_generation"] = serde_json::json!(6);
-        fs::write(dir.join("picters-compatibility.json"), manifest.to_string()).unwrap();
-        fs::write(
-            dir.join("build.config.constants"),
-            "BRANCH=android16-6.12\nKMI_GENERATION=6\n",
-        )
-        .unwrap();
-        assert!(load_compatibility(&dir).is_err());
+        for (channel, sdk, generation, accepted) in [
+            ("android16", 36, 5, true),
+            ("android17", 37, 6, true),
+            ("android16", 36, 6, false),
+            ("android17", 36, 6, false),
+            ("android17", 37, 5, false),
+        ] {
+            let manifest = serde_json::json!({"schema": 1, "channel": channel,
+                "android_sdk": sdk, "kmi_generation": generation});
+            fs::write(dir.join("picters-compatibility.json"), manifest.to_string()).unwrap();
+            fs::write(
+                dir.join("build.config.constants"),
+                format!("KMI_GENERATION={generation}\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                load_compatibility(&dir).is_ok(),
+                accepted,
+                "{channel}/{sdk}/{generation}"
+            );
+        }
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1367,7 +1369,11 @@ fn build_oot_module_zip(
     // versionCode is a monotonic build stamp (see module_version_code); the app
     // compares it against the latest release to gate features on a matching kernel.
     let compatibility = load_compatibility(Path::new("kernel_source"))?;
-    let channel = "A16";
+    let channel = if compatibility["channel"] == "android16" {
+        "A16"
+    } else {
+        "A17"
+    };
     let version_code = module_version_code(date_str);
     fs::write(
         stage.join("module.prop"),
@@ -1569,13 +1575,19 @@ fn load_compatibility(source: &Path) -> Result<serde_json::Value> {
             .and_then(|v| v.parse::<u64>().ok())
     });
     if value["schema"] != 1
-        || generation != Some(5)
+        || generation.is_none()
         || generation != value["kmi_generation"].as_u64()
-        || value["channel"] != "android16"
-        || value["android_sdk"] != 36
+        || !matches!(
+            (
+                value["channel"].as_str(),
+                value["android_sdk"].as_u64(),
+                generation
+            ),
+            (Some("android16"), Some(36), Some(5)) | (Some("android17"), Some(37), Some(6))
+        )
     {
         return Err(anyhow!(
-            "Only Android 16 / KMI 5 sources are supported; check compatibility metadata"
+            "Source compatibility metadata does not match its KMI generation"
         ));
     }
     Ok(value)
@@ -2780,9 +2792,19 @@ pub fn handle_build(
         .format("%Y%m%d-%H%M")
         .to_string();
     // Fixed names deliberately do not match the legacy manager's OOT-Modules
-    // marker or timestamped ZIP parser.
+    // marker or timestamped ZIP parser, for either compatibility channel.
+    let channel = if compatibility["channel"] == "android16" {
+        "A16"
+    } else {
+        "A17"
+    };
     let clean_localversion = localversion.trim_start_matches('-');
-    let asset_localversion = clean_localversion;
+    let android_label = if channel == "A16" {
+        "android16"
+    } else {
+        "android17"
+    };
+    let asset_localversion = clean_localversion.replacen("android16", android_label, 1);
     let feature_suffix = if feature_suffixes.is_empty() {
         String::new()
     } else {
@@ -2851,8 +2873,14 @@ pub fn handle_build(
         None
     };
 
+    let notice = if channel == "A17" {
+        "A17 Kernel not tested.\n"
+    } else {
+        ""
+    };
     let release_notes = format!(
-        "## Changes:\nFrequency fixes and updated Modules Manager.\n\n## Build\n- Kernel {kernel_version} · Android 16 · KMI 5\n- Built {date_str}\n\n{changelog}"
+        "## Changes:\nFrequency fixes and updated Modules Manager.\n\n## Build\n- Kernel {kernel_version} · {channel} · KMI {}\n- Built {date_str}\n\n{notice}{changelog}",
+        compatibility["kmi_generation"]
     );
     fs::write("RELEASE-NOTES.md", release_notes)?;
     fs::write(

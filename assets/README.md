@@ -1,6 +1,6 @@
 # Bundled manager
 
-Signed Picters Modules Manager **1.3.2**, versionCode **14**, arm64-v8a.
+Signed Picters Modules Manager **1.3.2**, versionCode **15**, arm64-v8a.
 
 This APK fixes Ultra → Full switching under thermal GPU limits, displays Max for the Full GPU profile and keeps frequency chips compact with a stable width. It contains frequency fixes and a read-only GitHub Releases button. It has no update downloader, module installer, APK installer or boot flasher. Both A16 and A17 OOT packs embed this same APK, but each pack's kernel modules are compiled separately for its paired kernel.
 

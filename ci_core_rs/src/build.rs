@@ -988,6 +988,11 @@ fn apply_susfs_overlay(kernel_source_path: &Path, susfs: &SusfsConfig) -> Result
         false,
     )?;
 
+    if let Some(revision) = &susfs.revision {
+        run_cmd(&["git", "fetch", "--depth=1", "origin", revision], Some(&temp_dir), false)?;
+        run_cmd(&["git", "checkout", "--detach", "FETCH_HEAD"], Some(&temp_dir), false)?;
+    }
+
     let patch_path = temp_dir.join(&susfs.patch_path);
     if !patch_path.exists() {
         fs::remove_dir_all(&temp_dir)?;

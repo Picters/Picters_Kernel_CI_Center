@@ -44,6 +44,7 @@ pub struct OotModule {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SusfsConfig {
     pub repo: String,
+    pub revision: Option<String>,
     pub branch: String,
     pub patch_path: String,
     pub fs_patch_dir: Option<String>,

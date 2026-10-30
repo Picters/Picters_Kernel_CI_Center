@@ -54,6 +54,7 @@
     "susfs": {
       "repo": "https://gitlab.com/simonpunk/susfs4ksu.git",
       "branch": "gki-android16-6.12",
+      "revision": "b213c54126fb243595ce7876e91d84d6e0861fec",
       "patch_path": "kernel_patches/50_add_susfs_in_gki-android16-6.12.patch",
       "fs_patch_dir": "kernel_patches/fs",
       "include_linux_patch_dir": "kernel_patches/include/linux"

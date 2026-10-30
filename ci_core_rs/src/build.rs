@@ -518,7 +518,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn source_checks_both_channels_sdk_and_kmi() {
+    fn source_checks_channels_and_vendor_kmi_independent_of_sdk() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -529,7 +529,8 @@ mod tests {
             ("android16", 36, 5, true),
             ("android17", 37, 6, true),
             ("android16", 36, 6, false),
-            ("android17", 36, 6, false),
+            ("android17", 36, 6, true),
+            ("android16", 37, 5, true),
             ("android17", 37, 5, false),
         ] {
             let manifest = serde_json::json!({"schema": 1, "channel": channel,
@@ -537,7 +538,7 @@ mod tests {
             fs::write(dir.join("picters-compatibility.json"), manifest.to_string()).unwrap();
             fs::write(
                 dir.join("build.config.constants"),
-                format!("KMI_GENERATION={generation}\n"),
+                format!("BRANCH=android16-6.12\nKMI_GENERATION={generation}\n"),
             )
             .unwrap();
             assert_eq!(
@@ -553,6 +554,7 @@ mod tests {
     fn compatibility_blocks_unknown_vendor_and_experimental_releases() {
         let mut manifest = serde_json::json!({
             "status": "experimental-unverified", "android_sdk": 36,
+            "vendor_kernel_branch": "android16-6.12", "kmi_generation": 5,
             "validated_vendor_fingerprints": []
         });
         assert!(!release_compatibility_valid(&manifest));
@@ -562,11 +564,194 @@ mod tests {
             serde_json::json!(["Xiaomi/pudding/firmware:16/test"]);
         assert!(release_compatibility_valid(&manifest));
         let guard = compatibility_install_guard(&manifest).unwrap();
-        assert!(guard.contains("ro.build.version.sdk"));
+        assert!(!guard.contains("ro.build.version.sdk"));
+        assert!(guard.contains("vermagic"));
         assert!(guard.contains("ro.vendor.build.fingerprint"));
         assert!(guard.contains("abort"));
         manifest["validated_vendor_fingerprints"] = serde_json::json!(["$(id)"]);
         assert!(compatibility_install_guard(&manifest).is_err());
+    }
+
+    #[test]
+    fn vendor_guard_runs_before_boot_for_both_system_sdks() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("picters-vendor-guard-{unique}"));
+        fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("cfg80211.ko");
+        let wifi = dir.join("qca_cld3_peach_v2.ko");
+        for sdk in [36, 37] {
+            for (generation, release, second_release, accepted) in [
+                (5, Some("6.12.23-android16-5-gstock-mi-4k"), None, true),
+                (6, Some("6.12.69-android16-6-gstock-mi-4k"), None, true),
+                (5, Some("6.12.69-android16-6-gstock-mi-4k"), None, false),
+                (6, Some("6.12.23-android16-5-gstock-mi-4k"), None, false),
+                (5, Some("6.12.23-android17-5-gstock"), None, false),
+                (
+                    5,
+                    Some("6.12.23-android16-5-gstock"),
+                    Some("6.12.69-android16-6-gother"),
+                    false,
+                ),
+                (5, None, None, false),
+                (5, Some("unreadable"), None, false),
+            ] {
+                for file in [&cfg, &wifi] {
+                    let _ = fs::remove_file(file);
+                }
+                for (file, release) in [(&cfg, release), (&wifi, second_release)] {
+                    if let Some(release) = release {
+                        let contents = if release == "unreadable" {
+                            "not a module".to_owned()
+                        } else {
+                            format!(
+                                "\0vermagic={release} SMP preempt mod_unload modversions aarch64\0"
+                            )
+                        };
+                        fs::write(file, contents).unwrap();
+                    }
+                }
+                let manifest = serde_json::json!({"vendor_kernel_branch": "android16-6.12",
+                    "kmi_generation": generation, "android_sdk": sdk});
+                let guard = compatibility_install_guard(&manifest).unwrap()
+                    .replace("/vendor_dlkm/lib/modules /vendor/lib/modules /odm_dlkm/lib/modules /odm/lib/modules", dir.to_str().unwrap());
+                let script = format!(
+                    "abort() {{ echo \"$*\" >&2; exit 42; }}\ngetprop() {{ echo SDK_WAS_READ >&2; echo {sdk}; }}\n{guard}\necho BOOT_TOUCHED\n"
+                );
+                let result = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(script)
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    result.status.success(),
+                    accepted,
+                    "sdk={sdk}, generation={generation}, vendor={release:?}: {}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&result.stdout).contains("BOOT_TOUCHED"),
+                    accepted
+                );
+                assert!(!String::from_utf8_lossy(&result.stderr).contains("SDK_WAS_READ"));
+            }
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn boot_performance_restores_governors_and_independent_floors_only_when_enabled() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("picters-perf-boot-{unique}"));
+        let cpu = "/sys/devices/system/cpu/cpufreq/policy0";
+        let gpu = "/sys/class/kgsl/kgsl-3d0";
+        let files = [
+            (format!("{cpu}/scaling_max_freq"), "3000000"),
+            (format!("{cpu}/scaling_min_freq"), "300000"),
+            (format!("{cpu}/scaling_governor"), "walt"),
+            (format!("{gpu}/max_gpuclk"), "400000000"),
+            (format!("{gpu}/devfreq/min_freq"), "100000000"),
+            (format!("{gpu}/devfreq/governor"), "msm-adreno-tz"),
+            ("/sys/kernel/picters_perf/cpu_max_freq".into(), "0:0"),
+            ("/sys/kernel/picters_perf/cpu_min_freq".into(), "0:0"),
+            ("/unrelated".into(), "unchanged"),
+        ];
+        for (enabled, locked) in [(false, false), (true, false), (true, true)] {
+            let applied = enabled && !locked;
+            for (node, value) in &files {
+                let path = dir.join(node.trim_start_matches('/'));
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, format!("{value}\n")).unwrap();
+            }
+            let conf_dir = dir.join("config");
+            fs::create_dir_all(&conf_dir).unwrap();
+            fs::write(
+                conf_dir.join("perf.conf"),
+                format!(
+                    "enabled {}\nprofile gaming\nkcpu 0:0\nkmin 0:3000000\ncpu {cpu} 3000000\n\
+                 gpu 400000000\ngovernor {cpu}/scaling_governor performance\n\
+                 governor {gpu}/devfreq/governor performance\n\
+                 minimum {cpu}/scaling_min_freq 3000000\n\
+                 minimum {gpu}/devfreq/min_freq 400000000\n\
+                 minimum {gpu}/devfreq/min_freq -1\ngovernor /unrelated performance\n",
+                    u8::from(enabled)
+                )
+                .replace("/sys/devices/", &format!("{}/sys/devices/", dir.display()))
+                .replace("/sys/class/", &format!("{}/sys/class/", dir.display()))
+                .replace(
+                    "/sys/kernel/picters_perf",
+                    &format!("{}/sys/kernel/picters_perf", dir.display()),
+                ),
+            )
+            .unwrap();
+            let lock = conf_dir.join("perf-apply.lock");
+            let _ = fs::remove_dir_all(&lock);
+            if locked {
+                fs::create_dir(&lock).unwrap();
+                fs::write(lock.join("owner"), format!("{} 0\n", std::process::id())).unwrap();
+            }
+            let service = build_boot_service()
+                .split("( sleep 20;")
+                .next()
+                .unwrap()
+                .replace(
+                    "/data/adb/picters_modules_manager",
+                    conf_dir.to_str().unwrap(),
+                )
+                .replace("/sys/devices/", &format!("{}/sys/devices/", dir.display()))
+                .replace("/sys/class/", &format!("{}/sys/class/", dir.display()))
+                .replace(
+                    "/sys/kernel/picters_perf",
+                    &format!("{}/sys/kernel/picters_perf", dir.display()),
+                );
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{service}\npmm_apply_perf; :\n"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let read =
+                |node: &str| fs::read_to_string(dir.join(node.trim_start_matches('/'))).unwrap();
+            assert_eq!(
+                read(&format!("{cpu}/scaling_governor")),
+                if applied { "performance\n" } else { "walt\n" }
+            );
+            assert_eq!(
+                read(&format!("{gpu}/devfreq/governor")),
+                if applied {
+                    "performance\n"
+                } else {
+                    "msm-adreno-tz\n"
+                }
+            );
+            assert_eq!(
+                read(&format!("{cpu}/scaling_min_freq")),
+                if applied { "3000000\n" } else { "300000\n" }
+            );
+            assert_eq!(
+                read(&format!("{gpu}/devfreq/min_freq")),
+                if applied {
+                    "400000000\n"
+                } else {
+                    "100000000\n"
+                }
+            );
+            assert_eq!(
+                read("/sys/kernel/picters_perf/cpu_min_freq"),
+                if applied { "0:3000000\n" } else { "0:0\n" }
+            );
+            assert_eq!(read("/unrelated"), "unchanged\n");
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1133,6 +1318,55 @@ fn collect_module_ko(
 /// modules_install to a staging dir, then copy ONLY whitelisted extra
 /// modules into the AnyKernel3 systemless payload. Stock vendor/GKI modules are
 /// never shipped, so on-device MODVERSIONS stays consistent.
+fn build_picters_charging(
+    kernel_source_path: &Path,
+    anykernel_dir: &Path,
+    make_args: &[&str],
+    build_env: &HashMap<String, String>,
+    source_setup_env: bool,
+) -> Result<()> {
+    let source = kernel_source_path.join("out/picters_charging_src");
+    fs::create_dir_all(&source)?;
+    fs::write(
+        source.join("Makefile"),
+        include_str!("picters_charging/Makefile"),
+    )?;
+    fs::write(
+        source.join("picters_charging.c"),
+        include_str!("picters_charging/picters_charging.c"),
+    )?;
+    fs::write(
+        source.join("vendor.symvers"),
+        include_str!("picters_charging/vendor.symvers"),
+    )?;
+    fs::write(
+        source.join("mca_vendor_abi.h"),
+        include_str!("picters_charging/mca_vendor_abi.h"),
+    )?;
+    let source = fs::canonicalize(source)?;
+    let module_arg = format!("M={}", source.display());
+    let symbols_arg = format!(
+        "KBUILD_EXTRA_SYMBOLS={}",
+        source.join("vendor.symvers").display()
+    );
+    let mut args = make_args.to_vec();
+    args.extend([module_arg.as_str(), symbols_arg.as_str()]);
+    run_make_targets(
+        kernel_source_path,
+        build_env,
+        &args,
+        &["modules"],
+        source_setup_env,
+    )?;
+    let destination = anykernel_dir.join("modules/system/lib/modules");
+    fs::create_dir_all(&destination)?;
+    fs::copy(
+        source.join("picters_charging.ko"),
+        destination.join("picters_charging.ko"),
+    )?;
+    Ok(())
+}
+
 fn package_extra_modules(
     kernel_source_path: &Path,
     anykernel_dir: &Path,
@@ -1231,8 +1465,9 @@ CONFDIR=/data/adb/picters_modules_manager
 # FREQ_QOS ceilings the "kcpu" line below pins the CPU cap once and perfd can't
 # undo it; the loop stays for the GPU and for kernels without them. The app only
 # ever writes real OPP-table frequencies (never above stock). pmm_apply_perf
-# returns non-zero once the app clears the flag, so the loop exits cleanly. Runs
-# in the background so it never blocks boot.
+# stays idle while persistence is disabled, so enabling it later also works.
+# Runs in the background so it never blocks boot.
+# PMM_PERF_V2: independent governors, minimums and kernel QoS floors.
 PERF_CONF=$CONFDIR/perf.conf
 pmm_perf_enabled() {
   [ -f "$PERF_CONF" ] || return 1
@@ -1245,33 +1480,136 @@ pmm_perf_enabled() {
 # so they only need pinning once — and doing it here, before the perf HAL is up,
 # means the cap is already in force for the whole boot.
 KCAP=/sys/kernel/picters_perf/cpu_max_freq
+KMIN=/sys/kernel/picters_perf/cpu_min_freq
 pmm_apply_kernel_caps() {
   [ -w "$KCAP" ] || return 1
   while read -r k rest; do
-    [ "$k" = "kcpu" ] && echo "$rest" > "$KCAP" 2>/dev/null
-  done < "$PERF_CONF"
-  return 0
-}
-pmm_perf_enabled && pmm_apply_kernel_caps
-
-pmm_apply_perf() {
-  pmm_perf_enabled || return 1
-  while read -r k a b; do
     case "$k" in
-      cpu) [ -n "$b" ] && [ -e "$a/scaling_max_freq" ] && echo "$b" > "$a/scaling_max_freq" 2>/dev/null ;;
-      gpu) [ -n "$a" ] && [ -e /sys/class/kgsl/kgsl-3d0/max_gpuclk ] && echo "$a" > /sys/class/kgsl/kgsl-3d0/max_gpuclk 2>/dev/null ;;
+      kcpu) echo "$rest" > "$KCAP" 2>/dev/null ;;
+      kmin) [ -w "$KMIN" ] && echo "$rest" > "$KMIN" 2>/dev/null ;;
     esac
   done < "$PERF_CONF"
   return 0
 }
-( sleep 20; while pmm_apply_perf; do sleep 10; done ) &
+# Shared application/service mutex. PID ownership prevents stealing a live
+# transaction. Only dead owners or an unfinished marker older than 30s are
+# recovered; the short reaper lock serializes stale-lock recovery.
+pmm_process_start() {
+  read -r process_pid process_stat 2>/dev/null < "/proc/$1/stat" || return 1
+  # Strip the parenthesized command (which may contain spaces); starttime is
+  # field 22, or the twentieth token after that command.
+  set -- ${process_stat##*) }
+  [ "$#" -ge 20 ] || return 1
+  shift 19
+  printf '%s' "$1"
+}
+pmm_perf_try_lock() {
+  PMM_LOCK=/data/adb/picters_modules_manager/perf-apply.lock
+  PMM_HAVE_LOCK=0
+  PMM_PID=$$
+  read -r PMM_PID _ < /proc/self/stat
+  read -r PMM_BOOT_ID < /proc/sys/kernel/random/boot_id || return 1
+  PMM_START=$(pmm_process_start "$PMM_PID") || return 1
+  mkdir -p /data/adb/picters_modules_manager || return 1
+  if mkdir "$PMM_LOCK" 2>/dev/null; then
+    printf '%s %s %s %s\n' "$PMM_PID" "$(date +%s)" "$PMM_BOOT_ID" "$PMM_START" > "$PMM_LOCK/owner" || {
+      rm -f "$PMM_LOCK/owner"; rmdir "$PMM_LOCK" 2>/dev/null; return 1;
+    }
+    PMM_HAVE_LOCK=1
+    return 0
+  fi
+  # A crashed reaper leaves an empty directory; it may be recovered after 30s.
+  if [ -d "$PMM_LOCK.reap" ]; then
+    modified=$(stat -c %Y "$PMM_LOCK.reap" 2>/dev/null)
+    case "$modified" in ''|*[!0-9]*) : ;; *)
+      now=$(date +%s)
+      [ "$((now - modified))" -ge 30 ] && rmdir "$PMM_LOCK.reap" 2>/dev/null
+      ;;
+    esac
+  fi
+  mkdir "$PMM_LOCK.reap" 2>/dev/null || return 1
+  owner_pid= owner_stamp= owner_boot= owner_start=
+  read -r owner_pid owner_stamp owner_boot owner_start 2>/dev/null < "$PMM_LOCK/owner"
+  stale=0
+  case "$owner_pid" in
+    ''|*[!0-9]*)
+      modified=$(stat -c %Y "$PMM_LOCK" 2>/dev/null)
+      case "$modified" in ''|*[!0-9]*) : ;; *)
+        now=$(date +%s); [ "$((now - modified))" -ge 30 ] && stale=1 ;;
+      esac
+      ;;
+    *)
+      if [ -n "$owner_boot" ] && [ "$owner_boot" != "$PMM_BOOT_ID" ]; then
+        stale=1
+      elif ! kill -0 "$owner_pid" 2>/dev/null; then
+        stale=1
+      elif [ -n "$owner_start" ]; then
+        current_start=$(pmm_process_start "$owner_pid")
+        [ "$owner_start" = "$current_start" ] || stale=1
+      fi
+      ;;
+  esac
+  if [ "$stale" = 1 ]; then
+    rm -f "$PMM_LOCK/owner"
+    rmdir "$PMM_LOCK" 2>/dev/null
+  fi
+  rmdir "$PMM_LOCK.reap" 2>/dev/null
+  return 1
+}
+pmm_perf_unlock() {
+  [ "$PMM_HAVE_LOCK" = 1 ] || return 0
+  owner_pid= owner_stamp= owner_boot= owner_start=
+  read -r owner_pid owner_stamp owner_boot owner_start 2>/dev/null < "$PMM_LOCK/owner"
+  if [ "$owner_pid" = "$PMM_PID" ]; then
+    rm -f "$PMM_LOCK/owner"
+    rmdir "$PMM_LOCK" 2>/dev/null
+  fi
+  PMM_HAVE_LOCK=0
+}
+
+pmm_apply_perf_locked() {
+  pmm_perf_enabled || return 1
+  pmm_apply_kernel_caps
+  while read -r k a b; do
+    case "$k" in
+      cpu) [ -n "$b" ] && [ -e "$a/scaling_max_freq" ] && echo "$b" > "$a/scaling_max_freq" 2>/dev/null ;;
+      gpu) [ -n "$a" ] && [ -e /sys/class/kgsl/kgsl-3d0/max_gpuclk ] && echo "$a" > /sys/class/kgsl/kgsl-3d0/max_gpuclk 2>/dev/null ;;
+      governor)
+        [ "$b" = performance ] || continue
+        case "$a" in
+          /sys/devices/system/cpu/cpufreq/policy*/scaling_governor|/sys/class/kgsl/kgsl-3d0/devfreq/governor)
+            [ -w "$a" ] && echo "$b" > "$a" 2>/dev/null ;;
+        esac
+        ;;
+      minimum)
+        case "$b" in ''|*[!0-9]*) continue ;; esac
+        case "$a" in
+          /sys/devices/system/cpu/cpufreq/policy*/scaling_min_freq|/sys/class/kgsl/kgsl-3d0/devfreq/min_freq)
+            [ -w "$a" ] && echo "$b" > "$a" 2>/dev/null ;;
+        esac
+        ;;
+    esac
+  done < "$PERF_CONF"
+  return 0
+}
+pmm_apply_perf() {
+  # Hold one mutex from the first config read through the final sysfs write.
+  # An application transaction uses the same mutex, including its rollback.
+  pmm_perf_try_lock || return 0
+  pmm_apply_perf_locked
+  apply_result=$?
+  pmm_perf_unlock
+  return "$apply_result"
+}
+pmm_apply_perf
+( sleep 20; while [ -f "$0" ]; do pmm_apply_perf; sleep 10; done ) &
 
 # --- Load staged drivers except the Wi-Fi injection stack (boot_load_enabled) -
 BOOT_FLAG=$CONFDIR/boot_load_enabled
 [ -f "$BOOT_FLAG" ] || exit 0
 MODDIR=/system/lib/modules
 [ -d "$MODDIR" ] || exit 0
-WIFI_SKIP="cfg80211 mac80211 88XXau 8188eu 8814au 88x2bu rtl8xxxu rtlwifi rtl_usb rtl8187 rtl8192cu rtl8192c-common ath ath9k_hw ath9k_common ath9k_htc ath6kl_core ath6kl_usb carl9170 mt7601u rt2x00lib rt2x00usb rt2800lib rt2800usb rt2500usb rt73usb zd1211rw usb_net_rndis_wlan"
+WIFI_SKIP="picters_charging cfg80211 mac80211 88XXau 8188eu 8814au 88x2bu rtl8xxxu rtlwifi rtl_usb rtl8187 rtl8192cu rtl8192c-common ath ath9k_hw ath9k_common ath9k_htc ath6kl_core ath6kl_usb carl9170 mt7601u rt2x00lib rt2x00usb rt2800lib rt2800usb rt2500usb rt73usb zd1211rw usb_net_rndis_wlan"
 is_wifi() { for w in $WIFI_SKIP; do [ "$1" = "$w" ] && return 0; done; return 1; }
 progress=1; pass=0
 while [ "$progress" = 1 ] && [ "$pass" -lt 12 ]; do
@@ -1312,7 +1650,7 @@ fn module_version_code(date_str: &str) -> u64 {
     }
 }
 
-fn build_oot_module_zip(
+fn build_system_pack_zip(
     module_zip_name: &str,
     version_str: &str,
     date_str: &str,
@@ -1346,7 +1684,7 @@ fn build_oot_module_zip(
     }
 
     // The signed manager is versioned with this CI checkout and distributed
-    // only inside each kernel's matching OOT pack. Never fetch an APK release.
+    // only inside each kernel's matching PictersKernelPack. Never fetch an APK release.
     let apk_src = cwd.join("assets/PictersModulesManager.apk");
     let expected_apk_hash =
         fs::read_to_string(cwd.join("assets/PictersModulesManager.apk.sha256"))?;
@@ -1378,13 +1716,13 @@ fn build_oot_module_zip(
     fs::write(
         stage.join("module.prop"),
         format!(
-            "id=picters-modules-pack\nname=Picters Modules Pack\nreleaseChannel={channel}\nversion={version_str}-{date_str}\nversionCode={version_code}\nauthor=Picters\ndescription=Extra kernel drivers — managed from the Picters Modules Manager app.\n"
+            "id=picters-modules-pack\nname=PictersKernelPack\nreleaseChannel={channel}\nversion={version_str}-{date_str}\nversionCode={version_code}\nauthor=Picters\ndescription=Extra kernel drivers — managed from the Picters Modules Manager app.\n"
         ),
     )?;
     let install_guard = compatibility_install_guard(&compatibility)?;
     let expected_kernel = fs::read_to_string("kernel_source/out/include/config/kernel.release")?;
     fs::write(stage.join("expected-kernel"), expected_kernel.trim())?;
-    let pair_guard = "EXPECTED_KERNEL=\"$(unzip -p \"$ZIPFILE\" expected-kernel)\"\n[ -n \"$EXPECTED_KERNEL\" ] && [ \"$(uname -r)\" = \"$EXPECTED_KERNEL\" ] || abort 'Install and boot the matching kernel before this OOT pack'\n";
+    let pair_guard = "EXPECTED_KERNEL=\"$(unzip -p \"$ZIPFILE\" expected-kernel)\"\n[ -n \"$EXPECTED_KERNEL\" ] && [ \"$(uname -r)\" = \"$EXPECTED_KERNEL\" ] || abort 'Install and boot the matching kernel before this PictersKernelPack'\n";
     let apk_ui_line = if apk_embedded {
         "ui_print \"- Picters Modules Manager staged as a system app — reboot to activate\"\n"
     } else {
@@ -1393,7 +1731,7 @@ fn build_oot_module_zip(
     fs::write(
         stage.join("customize.sh"),
         format!(
-            "#!/sbin/sh\n{install_guard}{pair_guard}SKIPUNZIP=0\nui_print \"- Picters Modules pack\"\nKO=$(ls \"$MODPATH/system/lib/modules/\"*.ko 2>/dev/null | wc -l)\nui_print \"- $KO drivers staged (non-Wi-Fi load on boot)\"\nset_perm_recursive \"$MODPATH\" 0 0 0755 0644\nfor s in action.sh service.sh; do [ -f \"$MODPATH/$s\" ] && chmod 0755 \"$MODPATH/$s\"; done\n# Settings (perf profile, boot-load flag, per-adapter tx power) live in\n# /data/adb/picters_modules_manager, outside this module dir — an update\n# replaces the module wholesale but never touches them.\nmkdir -p /data/adb/picters_modules_manager\nui_print \"- Your profile and settings are kept\"\n{apk_ui_line}ui_print \"- Use the module Action button to open Picters Modules Manager\"\n"
+            "#!/sbin/sh\n{install_guard}{pair_guard}SKIPUNZIP=0\nui_print \"- PictersKernelPack\"\nKO=$(ls \"$MODPATH/system/lib/modules/\"*.ko 2>/dev/null | wc -l)\nui_print \"- $KO drivers staged (non-Wi-Fi load on boot)\"\nset_perm_recursive \"$MODPATH\" 0 0 0755 0644\nfor s in action.sh service.sh thermalctl.sh chargingctl.sh post-fs-data.sh uninstall.sh; do [ -f \"$MODPATH/$s\" ] && chmod 0755 \"$MODPATH/$s\"; done\n# Settings (perf profile, boot-load flag, per-adapter tx power) live in\n# /data/adb/picters_modules_manager, outside this module dir — an update\n# replaces the module wholesale but never touches them.\nmkdir -p /data/adb/picters_modules_manager\nui_print \"- Your profile and settings are kept\"\n{apk_ui_line}ui_print \"- Use the module Action button to open Picters Modules Manager\"\n"
         ),
     )?;
     fs::write(
@@ -1412,15 +1750,31 @@ fn build_oot_module_zip(
     // built, opened via this module's Action button) is the control surface for
     // toggling any driver on demand via root.
     fs::write(stage.join("action.sh"), include_str!("mod_action.sh"))?;
+    fs::write(stage.join("thermalctl.sh"), include_str!("thermalctl.sh"))?;
+    fs::write(stage.join("chargingctl.sh"), include_str!("chargingctl.sh"))?;
+    fs::write(
+        stage.join("post-fs-data.sh"),
+        "#!/system/bin/sh\nMODDIR=\"${0%/*}\"\nsh \"$MODDIR/thermalctl.sh\" boot\n",
+    )?;
+    fs::write(
+        stage.join("uninstall.sh"),
+        "#!/system/bin/sh\nMODDIR=\"${0%/*}\"\nsh \"$MODDIR/chargingctl.sh\" restore || exit 1\nsh \"$MODDIR/thermalctl.sh\" restore\n",
+    )?;
     let service = build_boot_service();
     let split = service
         .find('\n')
         .ok_or_else(|| anyhow!("Service shebang missing"))?
         + 1;
-    let boot_guard = "MODDIR=\"${0%/*}\"\n[ \"$(uname -r)\" = \"$(cat \"$MODDIR/expected-kernel\")\" ] || exit 0\n";
+    let boot_guard = "MODDIR=\"${0%/*}\"\n[ \"$(uname -r)\" = \"$(cat \"$MODDIR/expected-kernel\")\" ] || exit 0\nsh \"$MODDIR/chargingctl.sh\" boot >> /data/adb/picters_modules_manager/charging-boot.log 2>&1\n";
     fs::write(
         stage.join("service.sh"),
-        format!("{}{}{}", &service[..split], boot_guard, &service[split..]),
+        format!(
+            "{}{}abort() {{ echo \"Picters vendor check: $*\" >&2; exit 0; }}\n{}{}",
+            &service[..split],
+            boot_guard,
+            install_guard,
+            &service[split..]
+        ),
     )?;
 
     // Ships inside the module so the app can show what's actually INSTALLED,
@@ -1566,7 +1920,7 @@ fn render_changelog(
 
 /// Channel metadata comes from the checked-out source, never from the variant name.
 fn load_compatibility(source: &Path) -> Result<serde_json::Value> {
-    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+    let mut value: serde_json::Value = serde_json::from_str(&fs::read_to_string(
         source.join("picters-compatibility.json"),
     )?)?;
     let constants = fs::read_to_string(source.join("build.config.constants"))?;
@@ -1578,24 +1932,28 @@ fn load_compatibility(source: &Path) -> Result<serde_json::Value> {
         || generation.is_none()
         || generation != value["kmi_generation"].as_u64()
         || !matches!(
-            (
-                value["channel"].as_str(),
-                value["android_sdk"].as_u64(),
-                generation
-            ),
-            (Some("android16"), Some(36), Some(5)) | (Some("android17"), Some(37), Some(6))
+            (value["channel"].as_str(), generation),
+            (Some("android16"), Some(5)) | (Some("android17"), Some(6))
         )
     {
         return Err(anyhow!(
             "Source compatibility metadata does not match its KMI generation"
         ));
     }
+    let vendor_branch = constants
+        .lines()
+        .find_map(|line| line.strip_prefix("BRANCH="))
+        .ok_or_else(|| anyhow!("Source vendor kernel branch is missing"))?;
+    value["vendor_kernel_branch"] = serde_json::json!(vendor_branch);
+    // Validate the generated guard before starting a build.
+    compatibility_install_guard(&value)?;
     Ok(value)
 }
 
 fn release_compatibility_valid(value: &serde_json::Value) -> bool {
     value["status"] == "validated"
-        && value["android_sdk"].as_u64().is_some()
+        && value["vendor_kernel_branch"].as_str().is_some()
+        && value["kmi_generation"].as_u64().is_some()
         && value["validated_vendor_fingerprints"]
             .as_array()
             .is_some_and(|v| {
@@ -1605,10 +1963,30 @@ fn release_compatibility_valid(value: &serde_json::Value) -> bool {
 
 /// Run before AnyKernel touches boot; also used by the standalone module installer.
 fn compatibility_install_guard(value: &serde_json::Value) -> Result<String> {
-    let mut guard = String::new();
-    if let Some(sdk) = value["android_sdk"].as_u64() {
-        guard.push_str(&format!("[ \"$(getprop ro.build.version.sdk)\" = \"{sdk}\" ] || abort 'Incompatible Android SDK; boot was not modified'\n"));
+    let branch = value["vendor_kernel_branch"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Vendor kernel branch is required"))?;
+    let (android, linux) = branch
+        .split_once('-')
+        .ok_or_else(|| anyhow!("Invalid vendor kernel branch"))?;
+    let android_version = android.strip_prefix("android").unwrap_or("");
+    if android_version.is_empty()
+        || !android_version.bytes().all(|c| c.is_ascii_digit())
+        || linux.split('.').count() != 2
+        || linux
+            .split('.')
+            .any(|v| v.is_empty() || !v.bytes().all(|c| c.is_ascii_digit()))
+    {
+        return Err(anyhow!("Unsafe vendor kernel branch"));
     }
+    let generation = value["kmi_generation"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("Vendor KMI generation is required"))?;
+    let pattern = format!("{linux}.*-{android}-{generation}-*");
+    let identity = format!("{linux}-{android}-{generation}");
+    let mut guard = include_str!("vendor_guard.sh")
+        .replace("@VENDOR_RELEASE_PATTERN@", &pattern)
+        .replace("@VENDOR_KMI@", &identity);
     if let Some(fingerprints) = value["validated_vendor_fingerprints"].as_array() {
         if !fingerprints.is_empty() {
             let mut allowed = Vec::new();
@@ -1616,9 +1994,10 @@ fn compatibility_install_guard(value: &serde_json::Value) -> Result<String> {
                 let fp = fp
                     .as_str()
                     .ok_or_else(|| anyhow!("Invalid vendor fingerprint"))?;
-                if !fp
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "/:._+-".contains(c))
+                if fp.is_empty()
+                    || !fp
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "/:._+-".contains(c))
                 {
                     return Err(anyhow!("Unsafe vendor fingerprint"));
                 }
@@ -2367,8 +2746,8 @@ pub fn handle_build(
             libclang_path.display().to_string(),
         );
         build_env.insert("KBUILD_GENDWARFKSYMS_STABLE".to_string(), "1".to_string());
-        build_env.insert("KBUILD_BUILD_USER".to_string(), "build-user".to_string());
-        build_env.insert("KBUILD_BUILD_HOST".to_string(), "build-host".to_string());
+        build_env.insert("KBUILD_BUILD_USER".to_string(), "Picters".to_string());
+        build_env.insert("KBUILD_BUILD_HOST".to_string(), "Picters".to_string());
         build_env.insert("LC_ALL".to_string(), "C".to_string());
     }
 
@@ -2786,6 +3165,16 @@ pub fn handle_build(
         )?;
     }
 
+    if is_sm8850 {
+        build_picters_charging(
+            &kernel_source_path,
+            Path::new("AnyKernel3"),
+            &make_args,
+            &build_env,
+            is_sm8850,
+        )?;
+    }
+
     let hkt = FixedOffset::east_opt(8 * 3600).ok_or_else(|| anyhow!("Invalid HKT offset"))?;
     let date_str = Utc::now()
         .with_timezone(&hkt)
@@ -2850,15 +3239,15 @@ pub fn handle_build(
         &date_str,
     );
 
-    // Standalone, manager-agnostic OOT-modules zip (extra-modules projects only).
+    // Standalone PictersKernelPack with drivers, manager and boot services.
     let module_zip_name: Option<String> = if proj.extra_fragment.is_some() {
         let name = format!(
-            "Mi17_OOTMODULES-{kernel_version}-{asset_localversion}{feature_suffix}-{date_str}.zip"
+            "Mi17_PictersKernelPack-{kernel_version}-{asset_localversion}{feature_suffix}-{date_str}.zip"
         );
         let version_str = format!("{}-{}", kernel_version, clean_localversion);
-        match build_oot_module_zip(&name, &version_str, &date_str, &changelog) {
+        match build_system_pack_zip(&name, &version_str, &date_str, &changelog) {
             Ok(true) => {
-                println!("Modules: built standalone OOT module zip {}", name);
+                println!("PictersKernelPack: built standalone package {}", name);
                 Some(name)
             }
             Ok(false) => {
@@ -2866,7 +3255,10 @@ pub fn handle_build(
                 None
             }
             Err(e) => {
-                return Err(anyhow!("Required OOT pack could not be built: {}", e));
+                return Err(anyhow!(
+                    "Required PictersKernelPack could not be built: {}",
+                    e
+                ));
             }
         }
     } else {
@@ -2892,7 +3284,7 @@ pub fn handle_build(
             file_sha256(Path::new(
                 module_zip_name
                     .as_deref()
-                    .ok_or_else(|| anyhow!("Required OOT pack missing"))?
+                    .ok_or_else(|| anyhow!("Required PictersKernelPack missing"))?
             ))?,
             module_zip_name.as_deref().unwrap()
         ),
@@ -2928,7 +3320,7 @@ pub fn handle_build(
                 release_tag.as_str(),
                 final_zip_name.as_str(),
             ];
-            // Attach the standalone OOT-modules zip as a second asset when present.
+            // Attach the matching PictersKernelPack as a second asset when present.
             if let Some(ref mz) = module_zip_name {
                 if Path::new(mz).exists() {
                     rel_args.push(mz.as_str());

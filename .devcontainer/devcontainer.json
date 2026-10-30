@@ -1,5 +1,5 @@
 {
-  "name": "Kokuban Kernel CI Center",
+  "name": "Picters Kernel CI Center",
   "build": {
     "dockerfile": "../Dockerfile",
     "context": ".."

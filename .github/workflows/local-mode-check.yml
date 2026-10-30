@@ -29,12 +29,12 @@ jobs:
       - name: Wrapper tests
         run: |
           ./scripts/check-shell.sh
-          ./scripts/test-kokuban-cli.sh
+          ./scripts/test-picters-cli.sh
 
-      - name: Kokuban validation
+      - name: Picters validation
         run: |
-          ./kokuban validate
-          ./kokuban plan mi17_sm8850 resukisu default --no-susfs --no-bbg
+          ./picters validate
+          ./picters plan mi17_sm8850 resukisu default --no-susfs --no-bbg
 
   docker-smoke:
     runs-on: ubuntu-latest
@@ -42,9 +42,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Build local image
-        run: docker build -t kokuban-local .
+        run: docker build -t picters-local .
 
       - name: Smoke test in container
         run: |
-          docker run --rm -v "$PWD":/workspace kokuban-local ./kokuban validate
-          docker run --rm -v "$PWD":/workspace kokuban-local ./kokuban plan mi17_sm8850 resukisu default --no-susfs --no-bbg
+          docker run --rm -v "$PWD":/workspace picters-local ./picters validate
+          docker run --rm -v "$PWD":/workspace picters-local ./picters plan mi17_sm8850 resukisu default --no-susfs --no-bbg

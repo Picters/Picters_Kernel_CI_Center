@@ -64,6 +64,7 @@ struct BuildInfo {
     branch: String,
     variant: String,
     kernel_commit: Option<String>,
+    kernel_checkout: Option<String>,
     apply_susfs: bool,
     apply_bbg: bool,
     local_root: String,
@@ -91,6 +92,7 @@ pub struct LocalBuildOptions {
     pub apply_susfs: bool,
     pub apply_bbg: bool,
     pub local_root: Option<PathBuf>,
+    pub kernel_checkout: Option<PathBuf>,
     pub offline: bool,
     pub no_fetch: bool,
     pub clean: bool,
@@ -400,6 +402,161 @@ fn prepare_kernel_source(spec: &KernelSourcePrep<'_>) -> Result<()> {
         )?;
     }
 
+    Ok(())
+}
+
+/// Copy a local Git checkout without modifying it or creating a commit. The
+/// destination must be fresh so previous build files cannot replace new input.
+fn snapshot_kernel_checkout(checkout: &Path, destination: &Path, branch: &str) -> Result<()> {
+    let checkout = fs::canonicalize(checkout).context("Invalid kernel checkout")?;
+    if destination.exists() {
+        return Err(anyhow!(
+            "Local snapshot destination already exists: {}. Choose a fresh --local-root.",
+            destination.display()
+        ));
+    }
+    let actual_branch =
+        run_cmd(&["git", "branch", "--show-current"], Some(&checkout), true)?.unwrap_or_default();
+    if actual_branch.trim() != branch {
+        return Err(anyhow!(
+            "Kernel checkout is on {:?}, expected {:?}",
+            actual_branch.trim(),
+            branch
+        ));
+    }
+    let original_head = run_cmd(&["git", "rev-parse", "HEAD"], Some(&checkout), true)?
+        .ok_or_else(|| anyhow!("Kernel checkout has no HEAD"))?;
+    if checkout.join(".gitmodules").exists() {
+        return Err(anyhow!(
+            "Local snapshots with submodules require explicit source preparation"
+        ));
+    }
+    let patch = Command::new("git")
+        .args(["diff", "--binary", "HEAD", "--"])
+        .current_dir(&checkout)
+        .output()?;
+    if !patch.status.success() {
+        return Err(anyhow!("Could not read local kernel changes"));
+    }
+    let untracked = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .current_dir(&checkout)
+        .output()?;
+    if !untracked.status.success() {
+        return Err(anyhow!("Could not enumerate local kernel files"));
+    }
+    fs::create_dir_all(
+        destination
+            .parent()
+            .ok_or_else(|| anyhow!("Invalid snapshot destination"))?,
+    )?;
+    let source_arg = checkout
+        .to_str()
+        .ok_or_else(|| anyhow!("Invalid checkout path"))?;
+    let destination_arg = destination
+        .to_str()
+        .ok_or_else(|| anyhow!("Invalid snapshot path"))?;
+    run_cmd(
+        &[
+            "git",
+            "clone",
+            "--no-hardlinks",
+            "--branch",
+            branch,
+            source_arg,
+            destination_arg,
+        ],
+        None,
+        false,
+    )?;
+    let patch_path = destination.join(".picters-local.patch");
+    fs::write(&patch_path, &patch.stdout)?;
+    if !patch.stdout.is_empty() {
+        run_cmd(
+            &["git", "apply", ".picters-local.patch"],
+            Some(destination),
+            false,
+        )?;
+    }
+    let mut extra_hashes = HashMap::new();
+    for raw in untracked
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+    {
+        let name = std::str::from_utf8(raw).context("Unsupported non-UTF8 local filename")?;
+        let relative = Path::new(name);
+        if relative
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            || relative.starts_with(".git")
+            || name.starts_with(".picters-local")
+        {
+            return Err(anyhow!("Unsupported local snapshot path: {name}"));
+        }
+        let original = checkout.join(relative);
+        let target = destination.join(relative);
+        let metadata = fs::symlink_metadata(&original)?;
+        if metadata.file_type().is_symlink() {
+            return Err(anyhow!(
+                "Untracked symlink requires explicit preparation before snapshot: {name}"
+            ));
+        }
+        if !metadata.is_file() {
+            return Err(anyhow!("Unsupported local file: {name}"));
+        }
+        fs::create_dir_all(
+            target
+                .parent()
+                .ok_or_else(|| anyhow!("Invalid local filename"))?,
+        )?;
+        fs::copy(&original, &target)?;
+        let hash = file_sha256(&target)?;
+        if file_sha256(&original)? != hash {
+            return Err(anyhow!("Local file changed while copying: {name}"));
+        }
+        extra_hashes.insert(name.to_string(), hash);
+    }
+    let after = Command::new("git")
+        .args(["diff", "--binary", "HEAD", "--"])
+        .current_dir(&checkout)
+        .output()?;
+    if !after.status.success() || after.stdout != patch.stdout {
+        return Err(anyhow!(
+            "Kernel checkout changed while snapshotting; retry with a fresh local root"
+        ));
+    }
+    let final_untracked = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .current_dir(&checkout)
+        .output()?;
+    if !final_untracked.status.success() || final_untracked.stdout != untracked.stdout {
+        return Err(anyhow!("Local file list changed while snapshotting"));
+    }
+    for (name, expected) in &extra_hashes {
+        if file_sha256(&checkout.join(name))? != *expected {
+            return Err(anyhow!("Local file changed while snapshotting: {name}"));
+        }
+    }
+    let final_head = run_cmd(&["git", "rev-parse", "HEAD"], Some(&checkout), true)?;
+    let copied_head = run_cmd(&["git", "rev-parse", "HEAD"], Some(destination), true)?;
+    if final_head.as_deref() != Some(original_head.as_str()) || copied_head != final_head {
+        return Err(anyhow!(
+            "Kernel branch moved while snapshotting; retry with a fresh local root"
+        ));
+    }
+    let manifest = serde_json::json!({
+        "checkout": checkout.display().to_string(),
+        "branch": branch,
+        "base_commit": original_head.trim(),
+        "patch_sha256": file_sha256(&patch_path)?,
+        "untracked_files": extra_hashes,
+        "committed": false,
+    });
+    fs::write(
+        destination.join(".picters-local-source.json"),
+        serde_json::to_string_pretty(&manifest)? + "\n",
+    )?;
     Ok(())
 }
 
@@ -723,6 +880,12 @@ fn print_plan(plan: &LocalBuildPlan<'_>) {
     println!("  no_fetch: {}", plan.options.no_fetch);
     println!("  clean: {}", plan.options.clean);
     println!("  force_lock: {}", plan.options.force_lock);
+    if let Some(checkout) = &plan.options.kernel_checkout {
+        println!(
+            "  local kernel checkout (with edits): {}",
+            checkout.display()
+        );
+    }
     println!("  central_root: {}", plan.central_root.display());
     println!("  local_root: {}", plan.local_root.display());
     println!("  mirror: {}", plan.mirror_dir.display());
@@ -805,16 +968,20 @@ pub fn handle_local_build(options: LocalBuildOptions) -> Result<()> {
         "Preparing kernel source for {} @ {}",
         options.project, options.branch
     );
-    prepare_kernel_source(&KernelSourcePrep {
-        project: &options.project,
-        proj: &proj,
-        branch: &options.branch,
-        mirror_dir: &mirror_dir,
-        source_dir: &source_dir,
-        offline: options.offline,
-        no_fetch: options.no_fetch,
-        clean: options.clean,
-    })?;
+    if let Some(checkout) = &options.kernel_checkout {
+        snapshot_kernel_checkout(checkout, &source_dir, &options.branch)?;
+    } else {
+        prepare_kernel_source(&KernelSourcePrep {
+            project: &options.project,
+            proj: &proj,
+            branch: &options.branch,
+            mirror_dir: &mirror_dir,
+            source_dir: &source_dir,
+            offline: options.offline,
+            no_fetch: options.no_fetch,
+            clean: options.clean,
+        })?;
+    }
 
     let kernel_commit = run_cmd(&["git", "rev-parse", "HEAD"], Some(&source_dir), true)
         .ok()
@@ -843,6 +1010,10 @@ pub fn handle_local_build(options: LocalBuildOptions) -> Result<()> {
         branch: options.branch.clone(),
         variant: variant.clone(),
         kernel_commit,
+        kernel_checkout: options
+            .kernel_checkout
+            .as_ref()
+            .map(|p| p.display().to_string()),
         apply_susfs: options.apply_susfs,
         apply_bbg: options.apply_bbg,
         local_root: local_root.display().to_string(),
@@ -878,6 +1049,56 @@ mod tests {
             .unwrap()
             .as_nanos();
         env::temp_dir().join(format!("{name}-{unique}"))
+    }
+
+    #[test]
+    fn local_snapshot_includes_edits_new_files_and_deletions_without_changing_checkout() {
+        let root = unique_temp_path("picters-snapshot-test");
+        let checkout = root.join("checkout");
+        let copied = root.join("snapshot");
+        fs::create_dir_all(&checkout).unwrap();
+        run_cmd(&["git", "init", "-b", "android17"], Some(&checkout), false).unwrap();
+        fs::write(checkout.join("tracked"), "before\n").unwrap();
+        fs::write(checkout.join("removed"), "remove me\n").unwrap();
+        run_cmd(&["git", "add", "."], Some(&checkout), false).unwrap();
+        run_cmd(
+            &[
+                "git",
+                "-c",
+                "user.name=Picters",
+                "-c",
+                "user.email=imelikov3@bk.ru",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-qm",
+                "Fixture baseline",
+            ],
+            Some(&checkout),
+            false,
+        )
+        .unwrap();
+        fs::write(checkout.join("tracked"), "after\n").unwrap();
+        fs::remove_file(checkout.join("removed")).unwrap();
+        fs::write(checkout.join("new-file"), "new contents\n").unwrap();
+        let before = run_cmd(&["git", "status", "--porcelain"], Some(&checkout), true).unwrap();
+        snapshot_kernel_checkout(&checkout, &copied, "android17").unwrap();
+        assert_eq!(fs::read(copied.join("tracked")).unwrap(), b"after\n");
+        assert_eq!(
+            fs::read(copied.join("new-file")).unwrap(),
+            b"new contents\n"
+        );
+        assert!(!copied.join("removed").exists());
+        assert!(copied.join(".picters-local-source.json").is_file());
+        assert_eq!(
+            before,
+            run_cmd(&["git", "status", "--porcelain"], Some(&checkout), true).unwrap()
+        );
+        assert!(snapshot_kernel_checkout(&checkout, &copied, "android17").is_err());
+        assert!(snapshot_kernel_checkout(&checkout, &root.join("wrong"), "android16").is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

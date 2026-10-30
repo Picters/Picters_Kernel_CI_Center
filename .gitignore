@@ -1,3 +1,7 @@
 ci_core_rs/target
 .claude/
 PictersModulesManager.apk
+
+/Picters
+__pycache__/
+*.pyc

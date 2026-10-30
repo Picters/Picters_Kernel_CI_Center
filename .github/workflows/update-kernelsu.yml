@@ -26,12 +26,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download CI Core
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          gh release download ci-core-latest -p "kokuban_ci_core" --clobber
-          chmod +x kokuban_ci_core
+      - name: Build CI Core
+        uses: ./.github/actions/build-core
 
       - name: Determine Commit Hash
         id: hash
@@ -48,7 +44,7 @@ jobs:
 
       - name: Execute Update
         run: |
-          ./kokuban_ci_core update \
+          ./Picters update \
             --token "${{ secrets.GH_TOKEN }}" \
             --project "${{ inputs.project }}" \
             --variant "${{ inputs.branch }}" \

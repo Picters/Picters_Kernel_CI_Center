@@ -1,0 +1,14 @@
+name: Build Picters CI Core
+description: Compile the checked-out CI source without requiring a binary release.
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: ci_core_rs
+    - name: Build Picters executable
+      shell: bash
+      run: |
+        cargo build --release --locked --manifest-path ci_core_rs/Cargo.toml
+        cp ci_core_rs/target/release/Picters ./Picters

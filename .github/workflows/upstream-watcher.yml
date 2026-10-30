@@ -16,16 +16,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download CI Core
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          gh release download ci-core-latest -p "kokuban_ci_core" --clobber
-          chmod +x kokuban_ci_core
+      - name: Build CI Core
+        uses: ./.github/actions/build-core
           
       - name: Check Upstream
         id: watcher
-        run: ./kokuban_ci_core watch
+        run: ./Picters watch
         
       - name: Commit Updated Tracker
         if: steps.watcher.outputs.found_updates == 'true'
@@ -47,16 +43,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download CI Core
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          gh release download ci-core-latest -p "kokuban_ci_core" --clobber
-          chmod +x kokuban_ci_core
+      - name: Build CI Core
+        uses: ./.github/actions/build-core
           
       - name: Perform Update
         run: |
-          ./kokuban_ci_core update \
+          ./Picters update \
             --token "${{ secrets.GH_TOKEN }}" \
             --project "${{ matrix.project }}" \
             --variant "${{ matrix.variant }}" \

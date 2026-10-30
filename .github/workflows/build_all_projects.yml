@@ -18,16 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download CI Core
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          gh release download ci-core-latest -p "kokuban_ci_core" --clobber
-          chmod +x kokuban_ci_core
+      - name: Build CI Core
+        uses: ./.github/actions/build-core
 
       - name: Generate Matrix
         id: set-matrix
-        run: ./kokuban_ci_core matrix-all
+        run: ./Picters matrix-all
 
   build:
     needs: matrix

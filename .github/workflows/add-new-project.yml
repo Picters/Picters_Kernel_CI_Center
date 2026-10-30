@@ -39,16 +39,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download CI Core
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          gh release download ci-core-latest -p "kokuban_ci_core" --clobber
-          chmod +x kokuban_ci_core
+      - name: Build CI Core
+        uses: ./.github/actions/build-core
 
       - name: Add to Configuration
         run: |
-          ./kokuban_ci_core add \
+          ./Picters add \
             --key "${{ inputs.project_key }}" \
             --repo "${{ inputs.repo_path }}" \
             --defconfig "${{ inputs.defconfig }}" \

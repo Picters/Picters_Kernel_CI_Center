@@ -152,10 +152,10 @@ jobs:
       - name: Build CI Core from this checkout
         run: |
           cargo build --release --locked --manifest-path ci_core_rs/Cargo.toml
-          cp ci_core_rs/target/release/kokuban_ci_core ./kokuban_ci_core
+          cp ci_core_rs/target/release/Picters ./Picters
 
       - name: Parse Configuration
-        run: ./kokuban_ci_core parse --project ${{ env.PROJECT }}
+        run: ./Picters parse --project ${{ env.PROJECT }}
 
       - name: Checkout Kernel Source
         uses: actions/checkout@v7
@@ -208,13 +208,13 @@ jobs:
           fi
           ARGS+=("--apply-susfs" "${{ env.APPLY_SUSFS }}")
           ARGS+=("--apply-bbg" "${{ env.APPLY_BBG }}")
-          ./kokuban_ci_core build "${ARGS[@]}"
+          ./Picters build "${ARGS[@]}"
 
       - name: Collect Build Artifacts
         if: always()
         id: collect-artifacts
         run: |
-          if ./kokuban_ci_core collect-artifacts --artifact-dir "$ARTIFACT_DIR"; then
+          if ./Picters collect-artifacts --artifact-dir "$ARTIFACT_DIR"; then
             :
           else
             echo "collect-artifacts command unavailable, falling back to shell collector."

@@ -3,29 +3,30 @@ set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CORE_DIR="$SCRIPT_DIR/ci_core_rs"
-CORE_BIN="${KOKUBAN_CORE:-$CORE_DIR/target/release/kokuban_ci_core}"
+CORE_BIN="${PICTERS_CORE:-${KOKUBAN_CORE:-$CORE_DIR/target/release/Picters}}"
 
 usage() {
   cat <<'EOF'
-Kokuban local CLI
+Picters local CLI
 
 Usage:
-  ./kokuban list
-  ./kokuban features [project]
-  ./kokuban validate
-  ./kokuban doctor
-  ./kokuban config <show|path|set>
-  ./kokuban cache <status|clean|prune> [...]
-  ./kokuban toolchain checksums [project]
-  ./kokuban preset <list|set|show|remove> [...]
-  ./kokuban run <preset> [extra local options...]
-  ./kokuban plan <project> [branch] [variant] [local options...]
-  ./kokuban build <project> [branch] [variant] [local options...]
-  ./kokuban local [local options...]
-  ./kokuban core [core options...]
+  ./picters list
+  ./picters features [project]
+  ./picters validate
+  ./picters doctor
+  ./picters config <show|path|set>
+  ./picters cache <status|clean|prune> [...]
+  ./picters toolchain checksums [project]
+  ./picters preset <list|set|show|remove> [...]
+  ./picters run <preset> [extra local options...]
+  ./picters plan <project> [branch] [variant] [local options...]
+  ./picters build <project> [branch] [variant] [local options...]
+  ./picters local [local options...]
+  ./picters core [core options...]
 
 Common local options:
   --local-root <dir>    Use a custom cache/workspace root
+  --kernel-checkout <dir> Snapshot local kernel edits from the selected branch
   --offline             Use existing local caches only
   --no-fetch            Do not fetch kernel source updates
   --clean               Remove untracked kernel source files before building
@@ -56,7 +57,7 @@ bool_value() {
 }
 
 ensure_core() {
-  if [ -n "${KOKUBAN_CORE:-}" ]; then
+  if [ -n "${PICTERS_CORE:-${KOKUBAN_CORE:-}}" ]; then
     return
   fi
 
@@ -73,7 +74,7 @@ ensure_core() {
   fi
 
   if [ "$needs_build" -eq 1 ]; then
-    echo "Building kokuban_ci_core release binary..."
+    echo "Building Picters release binary..."
     cargo build --release --manifest-path "$CORE_DIR/Cargo.toml"
   fi
 }

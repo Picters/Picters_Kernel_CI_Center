@@ -20,7 +20,7 @@ use std::process::{Command, Stdio};
 use crate::utils::*;
 
 #[derive(Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(name = "Picters", author, version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -161,6 +161,9 @@ enum Commands {
         no_bbg: bool,
         #[arg(long)]
         local_root: Option<PathBuf>,
+        /// Snapshot this checkout, including local edits, without fetching it.
+        #[arg(long)]
+        kernel_checkout: Option<PathBuf>,
         #[arg(long, action = clap::ArgAction::SetTrue)]
         offline: bool,
         #[arg(long, action = clap::ArgAction::SetTrue)]
@@ -331,6 +334,7 @@ fn main() -> Result<()> {
             with_bbg,
             no_bbg,
             local_root,
+            kernel_checkout,
             offline,
             no_fetch,
             clean,
@@ -362,6 +366,7 @@ fn main() -> Result<()> {
                 apply_susfs: resolved_susfs,
                 apply_bbg: resolved_bbg,
                 local_root: local_root.or(settings.local_root),
+                kernel_checkout,
                 offline,
                 no_fetch,
                 clean,

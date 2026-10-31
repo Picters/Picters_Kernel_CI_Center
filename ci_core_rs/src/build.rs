@@ -1690,9 +1690,9 @@ fn build_system_pack_zip(
 
     // The signed manager is versioned with this CI checkout and distributed
     // only inside each kernel's matching PictersKernelPack. Never fetch an APK release.
-    let apk_src = cwd.join("assets/PictersModulesManager.apk");
+    let apk_src = crate::utils::get_root_dir().join("assets/PictersModulesManager.apk");
     let expected_apk_hash =
-        fs::read_to_string(cwd.join("assets/PictersModulesManager.apk.sha256"))?;
+        fs::read_to_string(crate::utils::get_root_dir().join("assets/PictersModulesManager.apk.sha256"))?;
     if file_sha256(&apk_src)? != expected_apk_hash.split_whitespace().next().unwrap_or("") {
         return Err(anyhow!("Bundled manager APK checksum mismatch"));
     }

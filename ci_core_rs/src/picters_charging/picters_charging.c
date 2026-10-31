@@ -23,7 +23,7 @@ static DEFINE_MUTEX(charging_lock);
 static struct kobject *charging_kobj;
 static struct delayed_work charging_work;
 static const char * const slot_names[] = {
-	"buck_input", "single_chg_cur", "multi_chg_cur",
+	"buck_input", "buck_charge_curr", "single_chg_cur", "multi_chg_cur",
 };
 static bool owned[ARRAY_SIZE(slot_names)];
 static unsigned int requested_w;
@@ -33,7 +33,14 @@ static bool stopping;
 
 static bool needs_tick(void)
 {
-	return requested_w || owned[0] || owned[1] || owned[2];
+	int i;
+
+	if (requested_w)
+		return true;
+	for (i = 0; i < ARRAY_SIZE(owned); i++)
+		if (owned[i])
+			return true;
+	return false;
 }
 
 static int release_locked(void)
@@ -191,6 +198,33 @@ static ssize_t status_show(struct kobject *kobj,
 	return size;
 }
 
+/* Report the vendor election, separately from the requested target. These
+ * values are current ceilings, not measured current or achieved watts.
+ */
+static ssize_t effective_limits_show(struct kobject *kobj,
+                                    struct kobj_attribute *attr, char *buf)
+{
+	struct mca_votable *slot;
+	const char *client;
+	int i, value;
+	ssize_t size = 0;
+
+	mutex_lock(&charging_lock);
+	for (i = 0; i < ARRAY_SIZE(slot_names); i++) {
+		slot = mca_find_votable(slot_names[i]);
+		if (IS_ERR_OR_NULL(slot)) {
+			size += sysfs_emit_at(buf, size, "%s unavailable\n", slot_names[i]);
+			continue;
+		}
+		value = mca_get_effective_result(slot);
+		client = mca_get_effective_client(slot);
+		size += sysfs_emit_at(buf, size, "%s effective_ma=%d client=%s\n",
+				      slot_names[i], value, client ? client : "none");
+	}
+	mutex_unlock(&charging_lock);
+	return size;
+}
+
 static ssize_t capabilities_show(struct kobject *kobj,
 				 struct kobj_attribute *attr, char *buf)
 {
@@ -199,9 +233,11 @@ static ssize_t capabilities_show(struct kobject *kobj,
 
 static struct kobj_attribute power_target_attr = __ATTR_RW(power_target);
 static struct kobj_attribute status_attr = __ATTR_RO(status);
+static struct kobj_attribute effective_limits_attr = __ATTR_RO(effective_limits);
 static struct kobj_attribute capabilities_attr = __ATTR_RO(capabilities);
 static struct attribute *charging_attrs[] = {
-	&power_target_attr.attr, &status_attr.attr, &capabilities_attr.attr, NULL,
+	&power_target_attr.attr, &status_attr.attr, &effective_limits_attr.attr,
+	&capabilities_attr.attr, NULL,
 };
 static const struct attribute_group charging_group = { .attrs = charging_attrs };
 

@@ -1,2 +1,4 @@
 0xd888adf1	mca_vote	mca_voter	EXPORT_SYMBOL	
 0xc552fc72	mca_find_votable	mca_voter	EXPORT_SYMBOL	
+0x883255f3	mca_get_effective_result	mca_voter	EXPORT_SYMBOL	
+0x462d3f3e	mca_get_effective_client	mca_voter	EXPORT_SYMBOL	

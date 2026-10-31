@@ -2029,7 +2029,7 @@ fn dump_kmi_baseline(kernel_source_path: &Path) -> Result<bool> {
             .collect())
     }
 
-    let baseline = symbols(Path::new("configs/abi/mi17_sm8850.symvers"))?;
+    let baseline = symbols(&crate::utils::get_root_dir().join("configs/abi/mi17_sm8850.symvers"))?;
     let built = symbols(&kernel_source_path.join("out/vmlinux.symvers"))?;
     let mut changed = Vec::new();
     let mut missing = Vec::new();

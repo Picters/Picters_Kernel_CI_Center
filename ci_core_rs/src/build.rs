@@ -3303,9 +3303,9 @@ pub fn handle_build(
     update_manifest["expected_kernel_release"] = serde_json::json!(
         fs::read_to_string(kernel_source_path.join("out/include/config/kernel.release"))?.trim()
     );
-    update_manifest["manager_version"] = serde_json::json!("1.3.2");
+    update_manifest["manager_version"] = serde_json::json!("1.4.0");
     update_manifest["manager_sha256"] =
-        serde_json::json!(file_sha256(Path::new("assets/PictersModulesManager.apk"))?);
+        serde_json::json!(file_sha256(&crate::utils::get_root_dir().join("assets/PictersModulesManager.apk"))?);
     fs::write(
         "build-info.json",
         serde_json::to_string_pretty(&update_manifest)?,

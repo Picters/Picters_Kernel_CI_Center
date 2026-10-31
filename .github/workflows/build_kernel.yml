@@ -20,8 +20,8 @@ on:
         description: 'Build Mode Override'
         type: choice
         options:
-          - resukisu
-        default: 'resukisu'
+          - bakasu
+        default: 'bakasu'
       do_release:
         description: 'Create Release'
         type: boolean
@@ -32,14 +32,14 @@ on:
         required: false
         default: ''
       resukisu_setup_arg:
-        description: 'ReSukiSU setup.sh argument override'
+        description: 'BakaSU revision override (legacy input name)'
         type: string
         required: false
         default: ''
       apply_susfs:
-        description: 'Apply SuSFS dynamically during build'
+        description: 'Retired; leave disabled for BakaSU manual hooks'
         type: boolean
-        default: true
+        default: false
       apply_bbg:
         description: 'Apply Baseband Guard dynamically during build'
         type: boolean
@@ -56,7 +56,7 @@ on:
         type: string
       ksu_variant:
         type: string
-        default: 'resukisu'
+        default: 'bakasu'
       do_release:
         type: boolean
         default: false
@@ -68,7 +68,7 @@ on:
         default: ''
       apply_susfs:
         type: boolean
-        default: true
+        default: false
       apply_bbg:
         type: boolean
         default: false
@@ -98,7 +98,7 @@ jobs:
             apply_susfs="${{ github.event.client_payload.apply_susfs }}"
             apply_bbg="${{ github.event.client_payload.apply_bbg }}"
             if [ -z "$apply_susfs" ]; then
-              apply_susfs="true"
+              apply_susfs="false"
             fi
             if [ -z "$apply_bbg" ]; then
               apply_bbg="false"
@@ -115,13 +115,14 @@ jobs:
           fi
 
           if [ "$variant" = "default" ] || [ -z "$variant" ]; then
-            resolved_variant="resukisu"
+            resolved_variant="bakasu"
           else
             resolved_variant="$variant"
           fi
 
-          if [ "$resolved_variant" != "resukisu" ]; then
-            echo "Only ReSukiSU builds are supported."
+          case "$resolved_variant" in resukisu|sukisuultra) resolved_variant="bakasu" ;; esac
+          if [ "$resolved_variant" != "bakasu" ]; then
+            echo "Only BakaSU builds are supported."
             exit 1
           fi
 

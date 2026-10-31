@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       ksu_type:
-        description: 'The type of KernelSU to update (resukisu only)'
+        description: 'The type of KernelSU to update (bakasu only)'
         required: true
         type: string
       latest_commit_short:
@@ -29,10 +29,8 @@ jobs:
     steps:
       - name: Checkout Central Repo utility files
         uses: actions/checkout@v7
-        with:
-          sparse-checkout: |
-            configs/universal.gitignore
-          sparse-checkout-cone-mode: false
+      - name: Build CI Core
+        uses: ./.github/actions/build-core
 
       - name: Update Kernel Source for each project
         env:
@@ -42,44 +40,9 @@ jobs:
           LATEST_COMMIT_SHORT: ${{ inputs.latest_commit_short }}
           COMMIT_MESSAGE: ${{ inputs.commit_message }}
         run: |
-          # --- Configuration ---
-          if [[ "$KSU_TYPE" != "resukisu" ]]; then
-            echo "Unsupported ksu_type: $KSU_TYPE"
-            exit 1
-          fi
-          SETUP_URL="https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh"
-
-          echo "Updating projects with commit message: '$COMMIT_MESSAGE'"
-          
-          # Loop through projects passed as JSON
+          set -euo pipefail
           echo "$PROJECTS_TO_UPDATE" | jq -c '.[]' | while read -r project; do
             PROJECT_KEY=$(echo "$project" | jq -r '.key')
-            PROJECT_REPO=$(echo "$project" | jq -r '.repo')
-
-            echo "--> Processing update for project: $PROJECT_KEY"
-            
-            git clone --depth=1 --branch "$KSU_TYPE" "https://x-access-token:$ADMIN_TOKEN@github.com/$PROJECT_REPO.git" "temp_kernel"
-            cd temp_kernel
-
-            echo "Writing version file: $LATEST_COMMIT_SHORT"
-            echo "$LATEST_COMMIT_SHORT" > KERNELSU_VERSION.txt
-
-            echo "Syncing .gitignore file..."
-            cp ${{ github.workspace }}/configs/universal.gitignore ./.gitignore
-
-            echo "Running setup.sh from $SETUP_URL..."
-            curl -LSs "$SETUP_URL" | bash -s main
-            
-            git config --global user.name "Picters"
-            git config --global user.email "imelikov3@bk.ru"
-
-            if [[ -n $(git status --porcelain) ]]; then
-              git add .
-              git commit -m "$COMMIT_MESSAGE"
-              git push
-            else
-              echo "No file changes for $PROJECT_KEY, skipping push."
-            fi
-
-            cd .. && rm -rf temp_kernel
+            ./Picters update --token "$ADMIN_TOKEN" --project "$PROJECT_KEY" \
+              --variant "$KSU_TYPE" --commit-id "$LATEST_COMMIT_SHORT"
           done

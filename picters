@@ -32,8 +32,8 @@ Common local options:
   --clean               Remove untracked kernel source files before building
   --dry-run             Print the build plan without touching source or caches
   --force-lock          Remove an existing lock for this project before building
-  --with-susfs          Enable SuSFS (default)
-  --no-susfs            Disable SuSFS
+  --with-susfs          Retired; BakaSU uses manual hooks
+  --no-susfs            Keep external SuSFS disabled (default)
   --with-bbg            Enable Baseband Guard
   --no-bbg              Disable Baseband Guard (default)
 EOF
@@ -140,7 +140,7 @@ run_build() {
   fi
 
   local project="$1"
-  local branch="main"
+  local branch="android17"
   local variant="default"
   shift
 

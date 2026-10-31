@@ -1,7 +1,7 @@
 {
   "_globals": {
     "broadcast_channel": "@BLBDSBD",
-    "resukisu_chat_id": "@ReSukiSU",
+    "resukisu_chat_id": "@BakaSU_Grp",
     "resukisu_topic_id": 36
   },
   "mi17_sm8850": {
@@ -9,7 +9,7 @@
     "defconfig": "gki_defconfig",
     "localversion_base": "-android16-picters",
     "supported_ksu": [
-      "resukisu"
+      "bakasu"
     ],
     "version_method": "file",
     "toolchain_urls": [
@@ -51,14 +51,6 @@
         "make_args": ["CONFIG_RTL8822BU=m"]
       }
     ],
-    "susfs": {
-      "repo": "https://gitlab.com/simonpunk/susfs4ksu.git",
-      "branch": "gki-android16-6.12",
-      "revision": "b213c54126fb243595ce7876e91d84d6e0861fec",
-      "patch_path": "kernel_patches/50_add_susfs_in_gki-android16-6.12.patch",
-      "fs_patch_dir": "kernel_patches/fs",
-      "include_linux_patch_dir": "kernel_patches/include/linux"
-    },
     "bbg": {
       "setup_url": "https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh"
     },

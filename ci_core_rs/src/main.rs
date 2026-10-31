@@ -127,7 +127,7 @@ enum Commands {
         do_release: bool,
         #[arg(long, allow_hyphen_values = true)]
         custom_localversion: Option<String>,
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long, alias = "bakasu-setup-arg", allow_hyphen_values = true)]
         resukisu_setup_arg: Option<String>,
         #[arg(long, action = clap::ArgAction::Set)]
         apply_susfs: bool,
@@ -137,7 +137,7 @@ enum Commands {
     Local {
         #[arg(long)]
         project: String,
-        #[arg(long, default_value = "main")]
+        #[arg(long, default_value = "android17")]
         branch: String,
         #[arg(long, default_value = "default")]
         variant: String,
@@ -145,7 +145,7 @@ enum Commands {
         do_release: bool,
         #[arg(long, allow_hyphen_values = true)]
         custom_localversion: Option<String>,
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long, alias = "bakasu-setup-arg", allow_hyphen_values = true)]
         resukisu_setup_arg: Option<String>,
         #[arg(long, action = clap::ArgAction::Set)]
         apply_susfs: Option<bool>,
@@ -428,10 +428,10 @@ fn build_project_matrix_entries(
 
     for variant in raw_supported {
         let normalized = normalize_variant_name(&variant);
-        let entry = if normalized == "resukisu" {
+        let entry = if normalized == "bakasu" {
             HashMap::from([
                 ("project".to_string(), project_key.to_string()),
-                ("branch".to_string(), "resukisu".to_string()),
+                ("branch".to_string(), "bakasu".to_string()),
                 ("ksu_variant".to_string(), "default".to_string()),
             ])
         } else {
@@ -518,7 +518,7 @@ fn handle_add(options: AddOptions) -> Result<()> {
         defconfig: options.defconfig,
         localversion_base: options.localversion,
         lto: None,
-        supported_ksu: Some(vec!["resukisu".to_string()]),
+        supported_ksu: Some(vec!["bakasu".to_string()]),
         toolchain_urls: None,
         toolchain_sha256: None,
         toolchain_path_prefix: if options.toolchain_prefix.is_empty() {
@@ -600,7 +600,7 @@ fn handle_setup(
         )?;
 
         let readme_content = process_readme(&readme_tpl, &proj, &repo_url, &readme_language);
-        let target_branches = vec!["main", "resukisu"];
+        let target_branches = vec!["main", "bakasu"];
 
         let remote_out =
             run_cmd(&["git", "branch", "-r"], Some(&target_dir), true)?.unwrap_or_default();
@@ -612,19 +612,15 @@ fn handle_setup(
         for branch in target_branches {
             let branch_exists = remote_branches.contains(&branch);
 
-            if branch == "resukisu" && !branch_exists && remote_branches.contains(&"sukisuultra") {
+            if branch == "bakasu" && !branch_exists && remote_branches.contains(&"sukisuultra") {
                 run_cmd(
                     &["git", "checkout", "sukisuultra"],
                     Some(&target_dir),
                     false,
                 )?;
+                run_cmd(&["git", "branch", "-m", "bakasu"], Some(&target_dir), false)?;
                 run_cmd(
-                    &["git", "branch", "-m", "resukisu"],
-                    Some(&target_dir),
-                    false,
-                )?;
-                run_cmd(
-                    &["git", "push", "origin", "-u", "resukisu"],
+                    &["git", "push", "origin", "-u", "bakasu"],
                     Some(&target_dir),
                     false,
                 )?;
@@ -887,77 +883,82 @@ fn handle_update(
     let proj = load_project(&project_key)?;
 
     let normalized_variant = normalize_variant_name(&variant);
-    let repo_url = proj.repo;
-    let target_dir = PathBuf::from("temp_kernel");
-
-    if target_dir.exists() {
-        fs::remove_dir_all(&target_dir)?;
+    if normalized_variant != "bakasu" {
+        return Err(anyhow::anyhow!("Only BakaSU updates are supported"));
     }
+    let repo_url = &proj.repo;
+    for source_branch in ["android16", "android17"] {
+        let target_dir = PathBuf::from("temp_kernel");
 
-    let auth_url = format!("https://{}@github.com/{}.git", token, repo_url);
-    run_cmd(
-        &[
-            "git",
-            "clone",
-            "--depth=1",
-            "--branch",
-            &normalized_variant,
-            &auth_url,
-            target_dir.to_str().unwrap(),
-        ],
-        None,
-        false,
-    )?;
+        if target_dir.exists() {
+            fs::remove_dir_all(&target_dir)?;
+        }
 
-    fs::write(target_dir.join("KERNELSU_VERSION.txt"), &commit_id)?;
-
-    let univ_ignore = get_root_dir().join("configs/universal.gitignore");
-    if univ_ignore.exists() {
-        fs::copy(univ_ignore, target_dir.join(".gitignore"))?;
-    }
-
-    let ksu_configs: HashMap<String, KsuConfigItem> = serde_json::from_str(KSU_CONFIG_JSON)?;
-    if let Some(cfg) = ksu_configs.get(&normalized_variant) {
-        let setup_script = target_dir.join("setup.sh");
-        let script_content = reqwest::blocking::get(&cfg.setup_url)?.text()?;
-        fs::write(&setup_script, script_content)?;
-
-        let mut args = vec!["bash", "setup.sh"];
-        let setup_args_refs: Vec<&str> = cfg.setup_args.iter().map(|s| s.as_str()).collect();
-        args.extend(setup_args_refs);
-
-        run_cmd(&args, Some(&target_dir), false)?;
-        fs::remove_file(setup_script)?;
-    }
-
-    run_cmd(
-        &["git", "config", "user.name", "Picters"],
-        Some(&target_dir),
-        false,
-    )?;
-    run_cmd(
-        &["git", "config", "user.email", "imelikov3@bk.ru"],
-        Some(&target_dir),
-        false,
-    )?;
-
-    run_cmd(&["git", "add", "."], Some(&target_dir), false)?;
-    let status = run_cmd(&["git", "status", "--porcelain"], Some(&target_dir), true)?;
-
-    if !status.unwrap_or_default().is_empty() {
+        let auth_url = format!("https://{}@github.com/{}.git", token, repo_url);
         run_cmd(
             &[
                 "git",
-                "commit",
-                "-m",
-                &format!("ci: update {} to {}", normalized_variant, commit_id),
+                "clone",
+                "--depth=1",
+                "--branch",
+                source_branch,
+                &auth_url,
+                target_dir.to_str().unwrap(),
             ],
+            None,
+            false,
+        )?;
+
+        fs::write(target_dir.join("KERNELSU_VERSION.txt"), &commit_id)?;
+
+        let univ_ignore = get_root_dir().join("configs/universal.gitignore");
+        if univ_ignore.exists() {
+            fs::copy(univ_ignore, target_dir.join(".gitignore"))?;
+        }
+
+        let ksu_configs: HashMap<String, KsuConfigItem> = serde_json::from_str(KSU_CONFIG_JSON)?;
+        if let Some(cfg) = ksu_configs.get(&normalized_variant) {
+            let setup_script = target_dir.join("setup.sh");
+            let script_content = reqwest::blocking::get(&cfg.setup_url)?.text()?;
+            fs::write(&setup_script, script_content)?;
+
+            let mut args = vec!["bash", "setup.sh"];
+            args.push(&commit_id);
+
+            run_cmd(&args, Some(&target_dir), false)?;
+            fs::remove_file(setup_script)?;
+        }
+
+        run_cmd(
+            &["git", "config", "user.name", "Picters"],
             Some(&target_dir),
             false,
         )?;
-        run_cmd(&["git", "push"], Some(&target_dir), false)?;
-    }
+        run_cmd(
+            &["git", "config", "user.email", "imelikov3@bk.ru"],
+            Some(&target_dir),
+            false,
+        )?;
 
-    fs::remove_dir_all(target_dir)?;
+        build::integrate_bakasu_hooks(&target_dir, &project_key, &proj.defconfig, None)?;
+        run_cmd(&["git", "add", "."], Some(&target_dir), false)?;
+        let status = run_cmd(&["git", "status", "--porcelain"], Some(&target_dir), true)?;
+
+        if !status.unwrap_or_default().is_empty() {
+            run_cmd(
+                &[
+                    "git",
+                    "commit",
+                    "-m",
+                    &format!("ci: update {} to {}", normalized_variant, commit_id),
+                ],
+                Some(&target_dir),
+                false,
+            )?;
+            run_cmd(&["git", "push"], Some(&target_dir), false)?;
+        }
+
+        fs::remove_dir_all(target_dir)?;
+    }
     Ok(())
 }

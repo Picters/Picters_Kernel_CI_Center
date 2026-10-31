@@ -563,9 +563,13 @@ fn snapshot_kernel_checkout(checkout: &Path, destination: &Path, branch: &str) -
 fn resolved_variant(branch: &str, variant: &str) -> String {
     let trimmed = variant.trim();
     if trimmed.is_empty() || trimmed == "default" {
-        branch.to_string()
+        crate::utils::normalize_variant_name(if matches!(branch, "android16" | "android17") {
+            "bakasu"
+        } else {
+            branch
+        })
     } else {
-        trimmed.to_string()
+        crate::utils::normalize_variant_name(trimmed)
     }
 }
 
@@ -1099,6 +1103,15 @@ mod tests {
         assert!(snapshot_kernel_checkout(&checkout, &copied, "android17").is_err());
         assert!(snapshot_kernel_checkout(&checkout, &root.join("wrong"), "android16").is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn android_channels_default_to_bakasu_without_renaming_the_source() {
+        assert_eq!(resolved_variant("android16", "default"), "bakasu");
+        assert_eq!(resolved_variant("android17", "default"), "bakasu");
+        assert_eq!(resolved_variant("android17", "resukisu"), "bakasu");
+        assert_eq!(resolved_variant("android16", "sukisuultra"), "bakasu");
+        assert_eq!(crate::utils::variant_suffix("bakasu"), "BakaSU");
     }
 
     #[test]

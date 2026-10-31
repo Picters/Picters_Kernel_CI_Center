@@ -145,19 +145,22 @@ pub fn load_anykernel_config(config_key: &str) -> Result<AnyKernelConfig> {
 }
 
 pub fn normalize_variant_name(variant: &str) -> String {
-    variant.replace("sukisuultra", "resukisu")
+    match variant {
+        "resukisu" | "sukisuultra" => "bakasu".to_string(),
+        _ => variant.to_string(),
+    }
 }
 
 pub fn variant_suffix(variant: &str) -> String {
     match normalize_variant_name(variant).as_str() {
         "main" | "lkm" => "LKM".to_string(),
-        "resukisu" => "ReSuki".to_string(),
+        "bakasu" => "BakaSU".to_string(),
         _ => variant.to_uppercase(),
     }
 }
 
 pub fn is_resukisu_variant(variant: &str) -> bool {
-    normalize_variant_name(variant) == "resukisu"
+    normalize_variant_name(variant) == "bakasu"
 }
 
 pub fn save_json<T: serde::Serialize>(path: &Path, data: &T) -> Result<()> {

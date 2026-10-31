@@ -6,7 +6,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::config::{AnyKernelConfig, BbgConfig, OotModule, ProjectConfig, SusfsConfig};
+use crate::config::{AnyKernelConfig, BbgConfig, OotModule, ProjectConfig};
 use crate::utils::{
     cache_file_name, command_exists, env_flag, file_sha256, handle_notify, is_resukisu_variant,
     load_anykernel_config, load_project, run_cmd, run_cmd_with_env, set_github_output,
@@ -15,19 +15,6 @@ use crate::utils::{
 
 const ANYKERNEL_REPO: &str = "https://github.com/YuzakiKokuban/AnyKernel3.git";
 const ANYKERNEL_BRANCH: &str = "master";
-const SUSFS_KCONFIG_ENTRIES: &[(&str, &str)] = &[
-    ("CONFIG_KSU_SUSFS", "y"),
-    ("CONFIG_KSU_SUSFS_SUS_PATH", "y"),
-    ("CONFIG_KSU_SUSFS_SUS_MOUNT", "y"),
-    ("CONFIG_KSU_SUSFS_SUS_KSTAT", "y"),
-    ("CONFIG_KSU_SUSFS_SPOOF_UNAME", "y"),
-    ("CONFIG_KSU_SUSFS_ENABLE_LOG", "y"),
-    ("CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS", "y"),
-    ("CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG", "y"),
-    ("CONFIG_KSU_SUSFS_OPEN_REDIRECT", "y"),
-    ("CONFIG_KSU_SUSFS_SUS_MAP", "y"),
-];
-
 fn verify_toolchain_checksum(
     url: &str,
     path: &Path,
@@ -842,98 +829,6 @@ write_boot; # use flash_boot to skip ramdisk repack, e.g. for devices with init_
     }
 }
 
-fn copy_dir_files(source: &Path, dest: &Path) -> Result<()> {
-    if !source.is_dir() {
-        return Err(anyhow!("Source directory not found: {:?}", source));
-    }
-
-    fs::create_dir_all(dest)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() {
-            let file_name = path
-                .file_name()
-                .ok_or_else(|| anyhow!("Invalid file path: {:?}", path))?;
-            fs::copy(&path, dest.join(file_name))?;
-        }
-    }
-
-    Ok(())
-}
-
-fn stage_patch_in_cwd(patch_file: &Path, cwd: &Path) -> Result<PathBuf> {
-    let file_name = patch_file
-        .file_name()
-        .ok_or_else(|| anyhow!("Invalid patch file path: {:?}", patch_file))?;
-    let staged_patch = cwd.join(file_name);
-    fs::copy(patch_file, &staged_patch)?;
-    Ok(staged_patch)
-}
-
-fn cleanup_staged_patch(staged_patch: &Path, original_patch: &Path) {
-    if staged_patch != original_patch {
-        let _ = fs::remove_file(staged_patch);
-    }
-}
-
-fn run_patch_command(patch_file: &Path, cwd: &Path, dry_run: bool) -> Result<bool> {
-    let staged_patch = stage_patch_in_cwd(patch_file, cwd)?;
-    let result = (|| {
-        let patch_name = staged_patch
-            .file_name()
-            .ok_or_else(|| anyhow!("Invalid staged patch path: {:?}", staged_patch))?;
-
-        let mut command = std::process::Command::new("patch");
-        command.arg("-p1").arg("-N").arg("-F").arg("3");
-        if dry_run {
-            command.arg("--dry-run");
-        }
-        let status = command
-            .arg("-i")
-            .arg(patch_name)
-            .current_dir(cwd)
-            .status()?;
-        Ok(status.success())
-    })();
-    cleanup_staged_patch(&staged_patch, patch_file);
-    result
-}
-
-fn can_apply_patch(patch_file: &Path, cwd: &Path) -> Result<bool> {
-    run_patch_command(patch_file, cwd, true)
-}
-
-fn run_patch(patch_file: &Path, cwd: &Path) -> Result<bool> {
-    run_patch_command(patch_file, cwd, false)
-}
-
-fn apply_patch_once(patch_file: &Path, cwd: &Path) -> Result<bool> {
-    if can_apply_patch(patch_file, cwd)? {
-        return run_patch(patch_file, cwd);
-    }
-    Ok(false)
-}
-
-fn apply_patch_with_fallbacks(
-    patch_file: &Path,
-    kernel_source_path: &Path,
-    fallback_dirs: &[String],
-) -> Result<()> {
-    if apply_patch_once(patch_file, kernel_source_path)? {
-        return Ok(());
-    }
-
-    for fallback in fallback_dirs {
-        let cwd = kernel_source_path.join(fallback);
-        if cwd.is_dir() && apply_patch_once(patch_file, &cwd)? {
-            return Ok(());
-        }
-    }
-
-    Err(anyhow!("Failed to apply patch {:?}", patch_file))
-}
-
 fn ensure_bbg_lsm(content: &str) -> String {
     let mut lines = Vec::new();
     let mut in_lsm_block = false;
@@ -964,78 +859,6 @@ fn ensure_bbg_lsm(content: &str) -> String {
     }
 
     lines.join("\n") + "\n"
-}
-
-fn apply_susfs_overlay(kernel_source_path: &Path, susfs: &SusfsConfig) -> Result<()> {
-    let temp_dir = kernel_source_path.join(".susfs_workspace");
-    if temp_dir.exists() {
-        fs::remove_dir_all(&temp_dir)?;
-    }
-
-    run_cmd(
-        &[
-            "git",
-            "clone",
-            "--depth=1",
-            "--branch",
-            &susfs.branch,
-            &susfs.repo,
-            temp_dir
-                .to_str()
-                .ok_or_else(|| anyhow!("Invalid temp path"))?,
-        ],
-        None,
-        false,
-    )?;
-
-    if let Some(revision) = &susfs.revision {
-        run_cmd(&["git", "fetch", "--depth=1", "origin", revision], Some(&temp_dir), false)?;
-        run_cmd(&["git", "checkout", "--detach", "FETCH_HEAD"], Some(&temp_dir), false)?;
-    }
-
-    let patch_path = temp_dir.join(&susfs.patch_path);
-    if !patch_path.exists() {
-        fs::remove_dir_all(&temp_dir)?;
-        return Err(anyhow!("SuSFS patch not found: {:?}", patch_path));
-    }
-
-    let fs_source = temp_dir.join(susfs.fs_patch_dir.as_deref().unwrap_or("kernel_patches/fs"));
-    let fs_target = find_first_existing_dir(
-        kernel_source_path,
-        &[
-            "common/fs".to_string(),
-            "kernel_platform/common/fs".to_string(),
-            "fs".to_string(),
-        ],
-    )
-    .ok_or_else(|| anyhow!("Could not locate kernel fs directory for SuSFS"))?;
-    copy_dir_files(&fs_source, &fs_target)?;
-
-    let include_source = temp_dir.join(
-        susfs
-            .include_linux_patch_dir
-            .as_deref()
-            .unwrap_or("kernel_patches/include/linux"),
-    );
-    let include_target = find_first_existing_dir(
-        kernel_source_path,
-        &[
-            "common/include/linux".to_string(),
-            "kernel_platform/common/include/linux".to_string(),
-            "include/linux".to_string(),
-        ],
-    )
-    .ok_or_else(|| anyhow!("Could not locate kernel include/linux directory for SuSFS"))?;
-    copy_dir_files(&include_source, &include_target)?;
-
-    apply_patch_with_fallbacks(
-        &patch_path,
-        kernel_source_path,
-        &["common".to_string(), "kernel_platform/common".to_string()],
-    )?;
-
-    fs::remove_dir_all(&temp_dir)?;
-    Ok(())
 }
 
 fn apply_bbg_overlay(
@@ -1691,8 +1514,9 @@ fn build_system_pack_zip(
     // The signed manager is versioned with this CI checkout and distributed
     // only inside each kernel's matching PictersKernelPack. Never fetch an APK release.
     let apk_src = crate::utils::get_root_dir().join("assets/PictersModulesManager.apk");
-    let expected_apk_hash =
-        fs::read_to_string(crate::utils::get_root_dir().join("assets/PictersModulesManager.apk.sha256"))?;
+    let expected_apk_hash = fs::read_to_string(
+        crate::utils::get_root_dir().join("assets/PictersModulesManager.apk.sha256"),
+    )?;
     if file_sha256(&apk_src)? != expected_apk_hash.split_whitespace().next().unwrap_or("") {
         return Err(anyhow!("Bundled manager APK checksum mismatch"));
     }
@@ -2583,6 +2407,36 @@ fn build_extra_oot_modules(
     Ok(())
 }
 
+pub fn integrate_bakasu_hooks(
+    source: &Path,
+    project: &str,
+    defconfig: &str,
+    final_config: Option<&Path>,
+) -> Result<()> {
+    let script = crate::utils::get_root_dir().join("scripts/bakasu-hooks.py");
+    let mut command = std::process::Command::new("python3");
+    command
+        .arg(script)
+        .arg("--source")
+        .arg(source)
+        .arg("--project")
+        .arg(project)
+        .arg("--defconfig")
+        .arg(defconfig);
+    if let Some(config) = final_config {
+        command.arg("--check-config").arg(config);
+    }
+    let status = command
+        .status()
+        .context("Cannot run BakaSU hook integration")?;
+    if !status.success() {
+        return Err(anyhow!(
+            "BakaSU hook integration failed for {project}: {status}"
+        ));
+    }
+    Ok(())
+}
+
 pub fn handle_build(
     project_key: String,
     branch: String,
@@ -2798,7 +2652,7 @@ pub fn handle_build(
 
     let pinned_ksu = if is_resukisu_variant(&branch) {
         fs::read_to_string(kernel_source_path.join("KERNELSU_VERSION.txt"))
-            .context("Missing KERNELSU_VERSION.txt for the pinned ReSukiSU revision")?
+            .context("Missing KERNELSU_VERSION.txt for the pinned BakaSU revision")?
     } else {
         String::new()
     };
@@ -2810,7 +2664,7 @@ pub fn handle_build(
 
     let setup_url = match branch.as_str() {
         _ if is_resukisu_variant(&branch) => Some((
-            "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh",
+            "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh",
             resukisu_setup_arg,
         )),
         _ => None,
@@ -2823,22 +2677,12 @@ pub fn handle_build(
 
     let mut feature_suffixes = Vec::new();
     if apply_susfs {
-        if is_resukisu_variant(&branch) {
-            let susfs = proj
-                .susfs
-                .as_ref()
-                .ok_or_else(|| anyhow!("Project {} does not define a SuSFS source", project_key))?;
-            apply_susfs_overlay(&kernel_source_path, susfs)?;
-            let defconfig_file =
-                kernel_source_path.join(format!("arch/arm64/configs/{}", proj.defconfig));
-            update_kconfig_file(&defconfig_file, SUSFS_KCONFIG_ENTRIES)?;
-            feature_suffixes.push("susfs".to_string());
-        } else {
-            println!(
-                "Skipping SuSFS for branch '{}': SuSFS is only enabled for ReSukiSU builds.",
-                branch
-            );
-        }
+        return Err(anyhow!(
+            "BakaSU uses manual hooks; external SuSFS overlays are retired. Use --apply-susfs false"
+        ));
+    }
+    if is_resukisu_variant(&branch) {
+        integrate_bakasu_hooks(&kernel_source_path, &project_key, &proj.defconfig, None)?;
     }
 
     if apply_bbg {
@@ -3051,6 +2895,15 @@ pub fn handle_build(
         &["olddefconfig"],
         is_sm8850,
     )?;
+
+    if is_resukisu_variant(&branch) {
+        integrate_bakasu_hooks(
+            &kernel_source_path,
+            &project_key,
+            &proj.defconfig,
+            Some(&kernel_source_path.join("out/.config")),
+        )?;
+    }
 
     if !is_sm8850 {
         patch_setlocalversion_remove_dirty(&kernel_source_path)?;
@@ -3304,16 +3157,17 @@ pub fn handle_build(
         fs::read_to_string(kernel_source_path.join("out/include/config/kernel.release"))?.trim()
     );
     update_manifest["manager_version"] = serde_json::json!("1.4.0");
-    update_manifest["manager_sha256"] =
-        serde_json::json!(file_sha256(&crate::utils::get_root_dir().join("assets/PictersModulesManager.apk"))?);
+    update_manifest["manager_sha256"] = serde_json::json!(file_sha256(
+        &crate::utils::get_root_dir().join("assets/PictersModulesManager.apk")
+    )?);
     fs::write(
         "build-info.json",
         serde_json::to_string_pretty(&update_manifest)?,
     )?;
 
     if do_release {
-        let release_tag = format!("Mi17_Kernel-ReSuki-susfs-{date_str}");
-        let release_title = format!("Mi17_Kernel ReSuki-susfs Build ({date_str})");
+        let release_tag = format!("Mi17_Kernel-BakaSU-{date_str}");
+        let release_title = format!("Mi17_Kernel BakaSU Build ({date_str})");
 
         if Path::new(&final_zip_name).exists() {
             let notes_text = fs::read_to_string("RELEASE-NOTES.md")?;

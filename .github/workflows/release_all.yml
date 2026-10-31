@@ -37,6 +37,6 @@ jobs:
       branch: ${{ matrix.branch }}
       ksu_variant: ${{ matrix.ksu_variant }}
       do_release: true
-      apply_susfs: true
+      apply_susfs: false
       apply_bbg: false
     secrets: inherit

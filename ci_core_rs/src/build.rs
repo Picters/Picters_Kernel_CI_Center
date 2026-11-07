@@ -1146,55 +1146,6 @@ fn collect_module_ko(
 /// modules_install to a staging dir, then copy ONLY whitelisted extra
 /// modules into the AnyKernel3 systemless payload. Stock vendor/GKI modules are
 /// never shipped, so on-device MODVERSIONS stays consistent.
-fn build_picters_charging(
-    kernel_source_path: &Path,
-    anykernel_dir: &Path,
-    make_args: &[&str],
-    build_env: &HashMap<String, String>,
-    source_setup_env: bool,
-) -> Result<()> {
-    let source = kernel_source_path.join("out/picters_charging_src");
-    fs::create_dir_all(&source)?;
-    fs::write(
-        source.join("Makefile"),
-        include_str!("picters_charging/Makefile"),
-    )?;
-    fs::write(
-        source.join("picters_charging.c"),
-        include_str!("picters_charging/picters_charging.c"),
-    )?;
-    fs::write(
-        source.join("vendor.symvers"),
-        include_str!("picters_charging/vendor.symvers"),
-    )?;
-    fs::write(
-        source.join("mca_vendor_abi.h"),
-        include_str!("picters_charging/mca_vendor_abi.h"),
-    )?;
-    let source = fs::canonicalize(source)?;
-    let module_arg = format!("M={}", source.display());
-    let symbols_arg = format!(
-        "KBUILD_EXTRA_SYMBOLS={}",
-        source.join("vendor.symvers").display()
-    );
-    let mut args = make_args.to_vec();
-    args.extend([module_arg.as_str(), symbols_arg.as_str()]);
-    run_make_targets(
-        kernel_source_path,
-        build_env,
-        &args,
-        &["modules"],
-        source_setup_env,
-    )?;
-    let destination = anykernel_dir.join("modules/system/lib/modules");
-    fs::create_dir_all(&destination)?;
-    fs::copy(
-        source.join("picters_charging.ko"),
-        destination.join("picters_charging.ko"),
-    )?;
-    Ok(())
-}
-
 fn package_extra_modules(
     kernel_source_path: &Path,
     anykernel_dir: &Path,
@@ -1437,7 +1388,7 @@ BOOT_FLAG=$CONFDIR/boot_load_enabled
 [ -f "$BOOT_FLAG" ] || exit 0
 MODDIR=/system/lib/modules
 [ -d "$MODDIR" ] || exit 0
-WIFI_SKIP="picters_charging cfg80211 mac80211 88XXau 8188eu 8814au 88x2bu rtl8xxxu rtlwifi rtl_usb rtl8187 rtl8192cu rtl8192c-common ath ath9k_hw ath9k_common ath9k_htc ath6kl_core ath6kl_usb carl9170 mt7601u rt2x00lib rt2x00usb rt2800lib rt2800usb rt2500usb rt73usb zd1211rw usb_net_rndis_wlan"
+WIFI_SKIP="cfg80211 mac80211 88XXau 8188eu 8814au 88x2bu rtl8xxxu rtlwifi rtl_usb rtl8187 rtl8192cu rtl8192c-common ath ath9k_hw ath9k_common ath9k_htc ath6kl_core ath6kl_usb carl9170 mt7601u rt2x00lib rt2x00usb rt2800lib rt2800usb rt2500usb rt73usb zd1211rw usb_net_rndis_wlan"
 is_wifi() { for w in $WIFI_SKIP; do [ "$1" = "$w" ] && return 0; done; return 1; }
 progress=1; pass=0
 while [ "$progress" = 1 ] && [ "$pass" -lt 12 ]; do
@@ -1560,7 +1511,7 @@ fn build_system_pack_zip(
     fs::write(
         stage.join("customize.sh"),
         format!(
-            "#!/sbin/sh\n{install_guard}{pair_guard}SKIPUNZIP=0\nui_print \"- PictersKernelPack\"\nKO=$(ls \"$MODPATH/system/lib/modules/\"*.ko 2>/dev/null | wc -l)\nui_print \"- $KO drivers staged (non-Wi-Fi load on boot)\"\nset_perm_recursive \"$MODPATH\" 0 0 0755 0644\nfor s in action.sh service.sh thermalctl.sh chargingctl.sh post-fs-data.sh uninstall.sh; do [ -f \"$MODPATH/$s\" ] && chmod 0755 \"$MODPATH/$s\"; done\n# Settings (perf profile, boot-load flag, per-adapter tx power) live in\n# /data/adb/picters_modules_manager, outside this module dir — an update\n# replaces the module wholesale but never touches them.\nmkdir -p /data/adb/picters_modules_manager\nui_print \"- Your profile and settings are kept\"\n{apk_ui_line}ui_print \"- Use the module Action button to open Picters Modules Manager\"\n"
+            "#!/sbin/sh\n{install_guard}{pair_guard}SKIPUNZIP=0\nui_print \"- PictersKernelPack\"\nKO=$(ls \"$MODPATH/system/lib/modules/\"*.ko 2>/dev/null | wc -l)\nui_print \"- $KO drivers staged (non-Wi-Fi load on boot)\"\nset_perm_recursive \"$MODPATH\" 0 0 0755 0644\nfor s in action.sh service.sh thermalctl.sh post-fs-data.sh uninstall.sh; do [ -f \"$MODPATH/$s\" ] && chmod 0755 \"$MODPATH/$s\"; done\n# Settings (perf profile, boot-load flag, per-adapter tx power) live in\n# /data/adb/picters_modules_manager, outside this module dir — an update\n# replaces the module wholesale but never touches them.\nmkdir -p /data/adb/picters_modules_manager\nui_print \"- Your profile and settings are kept\"\n{apk_ui_line}ui_print \"- Use the module Action button to open Picters Modules Manager\"\n"
         ),
     )?;
     fs::write(
@@ -1580,21 +1531,20 @@ fn build_system_pack_zip(
     // toggling any driver on demand via root.
     fs::write(stage.join("action.sh"), include_str!("mod_action.sh"))?;
     fs::write(stage.join("thermalctl.sh"), include_str!("thermalctl.sh"))?;
-    fs::write(stage.join("chargingctl.sh"), include_str!("chargingctl.sh"))?;
     fs::write(
         stage.join("post-fs-data.sh"),
         "#!/system/bin/sh\nMODDIR=\"${0%/*}\"\nsh \"$MODDIR/thermalctl.sh\" boot\n",
     )?;
     fs::write(
         stage.join("uninstall.sh"),
-        "#!/system/bin/sh\nMODDIR=\"${0%/*}\"\nsh \"$MODDIR/chargingctl.sh\" restore || exit 1\nsh \"$MODDIR/thermalctl.sh\" restore\n",
+        "#!/system/bin/sh\nMODDIR=\"${0%/*}\"\nsh \"$MODDIR/thermalctl.sh\" restore\n",
     )?;
     let service = build_boot_service();
     let split = service
         .find('\n')
         .ok_or_else(|| anyhow!("Service shebang missing"))?
         + 1;
-    let boot_guard = "MODDIR=\"${0%/*}\"\n[ \"$(uname -r)\" = \"$(cat \"$MODDIR/expected-kernel\")\" ] || exit 0\nsh \"$MODDIR/chargingctl.sh\" boot >> /data/adb/picters_modules_manager/charging-boot.log 2>&1\n";
+    let boot_guard = "MODDIR=\"${0%/*}\"\n[ \"$(uname -r)\" = \"$(cat \"$MODDIR/expected-kernel\")\" ] || exit 0\n";
     fs::write(
         stage.join("service.sh"),
         format!(
@@ -3017,16 +2967,6 @@ pub fn handle_build(
             &kernel_source_path,
             Path::new("AnyKernel3"),
             oot,
-            &make_args,
-            &build_env,
-            is_sm8850,
-        )?;
-    }
-
-    if is_sm8850 {
-        build_picters_charging(
-            &kernel_source_path,
-            Path::new("AnyKernel3"),
             &make_args,
             &build_env,
             is_sm8850,

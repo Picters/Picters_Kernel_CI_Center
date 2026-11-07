@@ -1,2 +1,0 @@
-# Module.symvers has an empty namespace column after its final tab.
-ci_core_rs/src/picters_charging/vendor.symvers whitespace=-blank-at-eol
